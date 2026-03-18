@@ -43,21 +43,19 @@ export function activate(context: vscode.ExtensionContext) {
     clientOptions
   );
 
-  client.start();
-
-  client.onNotification("lsp-server/processedJson", (data: { files: any[] }) => {
-    if (isDevelopment) {
-      console.log("Recibido del LSP:", data);
-    }
-    files = data.files;
-    data.files.forEach(file => {
-      vscode.window.showInformationMessage(
-        `${file.file_name}`
-      );
+  client.start().then(() => {
+    client.onNotification("lsp-server/processedJson", (data: any) => {
+      files = data.files;
+      if (activePanel) {
+        activePanel.webview.postMessage({
+          command: 'lsp-server/processedJson',
+          files: files
+        });
+      }
     });
   });
 
-   client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {
+  client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {
     if (isDevelopment) {
       console.log("Recibido del LSP 2:", data);
     }

@@ -93,11 +93,20 @@ export class GraphCache {
       });
       visibleIds.add(child.id);
 
-      // Archivos → agregar sus funciones como compound children
+      // Archivos → agregar funciones y clases (con sus métodos) como compound children
       if (child.type === 'file') {
-        for (const fn of this.getChildrenOf(child.id)) {
-          cytoscapeNodes.push({ data: { ...fn, parent: child.id } });
-          visibleIds.add(fn.id);
+        for (const fileChild of this.getChildrenOf(child.id)) {
+          if (fileChild.type === 'class') {
+            cytoscapeNodes.push({ data: { ...fileChild, parent: child.id } });
+            visibleIds.add(fileChild.id);
+            for (const method of this.getChildrenOf(fileChild.id)) {
+              cytoscapeNodes.push({ data: { ...method, parent: fileChild.id } });
+              visibleIds.add(method.id);
+            }
+          } else {
+            cytoscapeNodes.push({ data: { ...fileChild, parent: child.id } });
+            visibleIds.add(fileChild.id);
+          }
         }
       }
     }

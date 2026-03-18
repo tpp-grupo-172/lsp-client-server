@@ -111,7 +111,7 @@
 			animate: false
 		}).run();
 
-		cy.fit(60);
+		cy.fit("60");
 
 		// ── Event handlers ─────────────────────────────────────────────────────────
 		// Folder: navigate into
@@ -121,6 +121,11 @@
 
 		// File: show info panel
 		cy.on('tap', 'node[type="file"]', (e) => {
+			selectedNode = graphCache.getNode(e.target.id());
+		});
+
+		// Class: show detail panel
+		cy.on('tap', 'node[type="class"]', (e) => {
 			selectedNode = graphCache.getNode(e.target.id());
 		});
 
@@ -188,6 +193,27 @@
 					'background-opacity': 0.85,
 					'border-width': 2,
 					'border-color': '#569cd6',
+
+					label: 'data(displayLabel)',
+					'text-valign': 'top',
+					'text-halign': 'center',
+					'text-margin-y': -10,
+					'font-size': 13,
+					'font-family': '"Consolas", "Menlo", monospace',
+					color: '#569cd6',
+					'font-weight': 'bold',
+					padding: '22px',
+					cursor: 'pointer'
+				}
+			},
+			{
+				selector: 'node[type="class"]',
+				style: {
+					shape: 'round-rectangle',
+					'background-color': '#25466e',
+					'background-opacity': 0.6,
+					'border-width': 2,
+					'border-color': '#6fb0e0',
 
 					label: 'data(displayLabel)',
 					'text-valign': 'top',

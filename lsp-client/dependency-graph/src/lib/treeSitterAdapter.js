@@ -85,6 +85,7 @@ export function buildGraphFromTreeSitter(data) {
         let currentId = '__root__';
         for (let i = 0; i < dirs.length; i++) {
             const folderId = dirs.slice(0, i + 1).join('/');
+            console.log("FOLDER ID:", currentId)
             if (!nodes.has(folderId)) {
                 addNode({ id: folderId, label: dirs[i], type: 'folder' });
                 link(currentId, folderId, 'contains');
@@ -97,10 +98,9 @@ export function buildGraphFromTreeSitter(data) {
     function setFunctionDeclarations(data) {
         for (const file of data.files) {
             console.log(file);
-            let { dirs, filename } = parsePath(file.file_name);
-            dirs = dirs.slice(-3)
+            let { dirs, filename } = parsePath(file.path);
+            //dirs = dirs.slice(-3)
             const parentFolderId = ensureFolders(dirs);
-
             // File node
             addNode({ id: file.path, label: filename, type: 'file', path: file.path });
             link(parentFolderId, file.path, 'contains');
@@ -113,9 +113,28 @@ export function buildGraphFromTreeSitter(data) {
                     label: fn.name,
                     type: 'function',
                     path: file.path,
-                    returnType: fn.returnType ?? null,
+                    returnType: fn.returnType ?? fn.return_type ?? null,
                 });
                 link(file.path, fnId, 'declares');
+            }
+
+            // Class nodes and their methods
+            for (const cls of (file.classes ?? [])) {
+                const classId = `${file.path}::${cls.name}`;
+                addNode({ id: classId, label: cls.name, type: 'class', path: file.path });
+                link(file.path, classId, 'declares');
+
+                for (const method of (cls.methods ?? [])) {
+                    const methodId = `${classId}::${method.name}`;
+                    addNode({
+                        id: methodId,
+                        label: method.name,
+                        type: 'method',
+                        path: file.path,
+                        returnType: method.returnType ?? method.return_type ?? null,
+                    });
+                    link(classId, methodId, 'declares');
+                }
             }
         }
     }
