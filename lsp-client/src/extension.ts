@@ -16,6 +16,7 @@ export function activate(context: vscode.ExtensionContext) {
   const serverPath = context.asAbsolutePath(
     path.join("..", "lsp-backend", "target", "debug", "lsp-backend")
   );
+  const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
 
   const serverOptions: ServerOptions = {
     run: { command: serverPath, transport: TransportKind.stdio },
@@ -44,18 +45,36 @@ export function activate(context: vscode.ExtensionContext) {
 
   client.start();
 
-  // Register LSP notification handler at activation time so no notifications are missed
-  client.start().then(() => {
-    client.onNotification("lsp-server/processedJson", (data: any) => {
-      files = data.files;
-      if (activePanel) {
-        activePanel.webview.postMessage({
-          command: 'lsp-server/processedJson',
-          files: files
-        });
+  client.onNotification("lsp-server/processedJson", (data: { files: any[] }) => {
+    if (isDevelopment) {
+      console.log("Recibido del LSP:", data);
+    }
+    files = data.files;
+    data.files.forEach(file => {
+      vscode.window.showInformationMessage(
+        `${file.file_name}`
+      );
+    });
+  });
+
+   client.onNotification("lsp-server/showFilesToChange", (data: { files: string[]}) => {
+    if (isDevelopment) {
+      console.log("Recibido del LSP 2:", data);
+    }
+    vscode.window.showInformationMessage(
+      `Function was changes, make sure to modify any needed places`,
+      'Open files'
+    ).then(selection => {
+      if (selection === 'Open files') {
+        data.files.forEach((file: any) => {
+          console.log("Recibido del LSP 3:", file);
+          vscode.workspace.openTextDocument(file)
+            .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
+        })
       }
     });
   });
+
 
   vscode.window.showInformationMessage("LSP extension active!");
 
