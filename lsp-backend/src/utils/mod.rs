@@ -27,6 +27,7 @@ pub enum SignatureChange {
     ParameterRemoved(String),
 }
 
+/// Extrae el array de funciones del JSON analizado de un archivo.
 fn extract_functions(file_value: &Value) -> Vec<&Value> {
     file_value
         .get("functions")
@@ -35,10 +36,12 @@ fn extract_functions(file_value: &Value) -> Vec<&Value> {
         .unwrap_or_default()
 }
 
+/// Retorna el nombre de una función desde su `Value`.
 fn get_name(func: &Value) -> Option<&str> {
     func.get("name")?.as_str()
 }
 
+/// Retorna la lista de nombres de parámetros de una función. Soporta tanto strings planos como objetos `{ "name": "..." }`.
 fn get_params(func: &Value) -> Vec<String> {
     func.get("parameters")
         .and_then(|p| p.as_array())
@@ -55,6 +58,7 @@ fn get_params(func: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Retorna el tipo de retorno de una función como string, o `None` si es `null` o no existe.
 fn get_return_type(func: &Value) -> Option<String> {
     func.get("return_type")
         .filter(|v| !v.is_null())
@@ -65,6 +69,7 @@ fn get_return_type(func: &Value) -> Option<String> {
         })
 }
 
+/// Calcula la similitud Jaccard entre dos listas de parámetros (0.0 = ninguno en común, 1.0 = idénticos).
 fn param_similarity(old: &[String], new: &[String]) -> f32 {
     if old.is_empty() && new.is_empty() {
         return 1.0;
@@ -79,6 +84,7 @@ fn param_similarity(old: &[String], new: &[String]) -> f32 {
     shared as f32 / union as f32
 }
 
+/// Calcula similitud basada en tokens entre dos nombres snake_case (0.0–1.0).
 fn name_similarity(a: &str, b: &str) -> f32 {
     if a == b {
         return 1.0;
@@ -96,6 +102,8 @@ fn name_similarity(a: &str, b: &str) -> f32 {
     shared as f32 / union as f32
 }
 
+/// Calcula el score de similitud ponderado entre dos funciones:
+/// 50% parámetros + 30% tipo de retorno + 20% nombre. Usado para detectar renombres.
 fn similarity_score(old_func: &Value, new_func: &Value) -> f32 {
     let old_params = get_params(old_func);
     let new_params = get_params(new_func);
@@ -120,6 +128,8 @@ fn similarity_score(old_func: &Value, new_func: &Value) -> f32 {
     0.5 * param_sim + 0.3 * return_sim + 0.2 * name_sim
 }
 
+/// Compara dos definiciones de función y retorna la lista de cambios en su firma
+/// (tipo de retorno, parámetros agregados o eliminados).
 fn detect_signature_changes(old_func: &Value, new_func: &Value) -> Vec<SignatureChange> {
     let mut changes = Vec::new();
 
@@ -149,6 +159,8 @@ fn detect_signature_changes(old_func: &Value, new_func: &Value) -> Vec<Signature
     changes
 }
 
+/// Compara la versión actual de un archivo con la versión previa en el store y retorna
+/// los cambios detectados: funciones añadidas, eliminadas, renombradas o con firma modificada.
 pub fn detect_function_changes(
     file_path: &PathBuf,
     current_value: &Value,
@@ -283,6 +295,8 @@ pub fn affected_files_by_change(
     result
 }
 
+/// Retorna las funciones definidas en el workspace que nunca aparecen como destino
+/// en ninguna `Connection`, es decir, que no son llamadas por ningún otro archivo.
 pub fn find_unused_functions(
     functions_in_files: &[FunctionsInFiles],
     connections: &[Connections],
