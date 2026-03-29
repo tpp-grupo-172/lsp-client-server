@@ -88,10 +88,14 @@ impl Notification for ShowFilesToChange {
 }
 
 // Helpers para manejo de paths
+
+/// Devuelve el directorio de caché (`<workspace>/.lsp-analysis/files`) para el workspace dado.
 fn cache_root_for_workspace(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".lsp-analysis").join("files")
 }
 
+/// Resuelve la raíz del workspace a partir de los parámetros de `initialize`.
+/// Prueba primero `root_uri`, luego el primer `workspaceFolder`. Retorna `None` si ninguno está disponible.
 fn resolve_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
     // 1) root_uri (si viene)
     if let Some(root_uri) = &params.root_uri {
@@ -111,10 +115,12 @@ fn resolve_workspace_root(params: &InitializeParams) -> Option<PathBuf> {
     None
 }
 
+/// Crea el directorio `dir` y todos sus padres si no existen.
 async fn ensure_dirs(dir: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dir).await
 }
 
+/// Retorna el hash Blake3 (hex) del path serializado como string.
 fn hash_path(path: &Path) -> String {
     // to_string_lossy para tolerar paths con Unicode/OS raros.
     let s: Cow<str> = path.to_string_lossy();
@@ -122,11 +128,15 @@ fn hash_path(path: &Path) -> String {
     hash.to_hex().to_string()
 }
 
+/// Retorna el hash Blake3 (hex) del contenido de un archivo.
 fn hash_content(content: &[u8]) -> String {
     blake3::hash(content).to_hex().to_string()
 }
 
 // Helpers de escritura atómica
+
+/// Escribe `json` en `target_json_path` de forma atómica:
+/// primero serializa a un `.tmp`, luego hace rename al destino final.
 async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Result<()> {
     let tmp_path = target_json_path.with_extension("json.tmp");
 
@@ -145,6 +155,7 @@ async fn write_json_atomic(target_json_path: &Path, json: &Value) -> std::io::Re
     fs::rename(&tmp_path, target_json_path).await
 }
 
+/// Envuelve el JSON de análisis con metadatos de caché: schema_version, path, content_hash y timestamp.
 fn wrap_with_metadata(original_path: &Path, raw: Value, content_hash: &str) -> Value {
     json!({
         "schema_version": 1,
@@ -200,6 +211,8 @@ async fn cleanup_orphan_entries_in(cache_dir: &Path) {
     }
 }
 
+/// Lee `.lspignore` en la raíz del workspace y retorna la lista de paths a ignorar.
+/// Las líneas vacías y los comentarios (`#`) se descartan. Retorna vacío si el archivo no existe.
 async fn load_ignore_list(workspace_root: &Path) -> Vec<PathBuf> {
     let ignore_file = workspace_root.join(".lspignore");
     match fs::read_to_string(&ignore_file).await {
@@ -212,12 +225,15 @@ async fn load_ignore_list(workspace_root: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Retorna `true` si `path` está dentro de alguna carpeta ignorada.
 fn is_ignored(path: &Path, ignored_folders: &[PathBuf]) -> bool {
     ignored_folders
         .iter()
         .any(|folder| path.starts_with(folder))
 }
 
+/// Convierte el store en memoria en la lista de `LspFileMessage` lista para enviar al frontend.
+/// Los paths de archivo se relativizan respecto a `root`.
 fn format_for_lsp_message(
     data: RwLockReadGuard<'_, HashMap<PathBuf, Value>>,
     root: PathBuf
@@ -253,6 +269,7 @@ fn format_for_lsp_message(
 }
 
 impl Backend {
+    /// Recarga la lista de carpetas ignoradas leyendo `.lspignore` desde el workspace actual.
     async fn reload_ignore_list(&self) {
         let root = { self.workspace_root.read().await.clone() };
         let list = load_ignore_list(&root).await;
@@ -260,6 +277,8 @@ impl Backend {
         *guard = list;
     }
 
+    /// Escanea todos los archivos `.py` del workspace, los analiza con Tree-sitter
+    /// (usando caché cuando el contenido no cambió) y envía los resultados al frontend.
     async fn analyze_workspace(&self) {
         let root = { self.workspace_root.read().await.clone() };
         let ignored = { self.ignored_folders.read().await.clone() };
@@ -339,6 +358,7 @@ impl Backend {
         }
     }
 
+    /// Registra watchers de sistema de archivos para detectar cambios en cualquier archivo del workspace.
     async fn register_fs_watchers(&self) {
         let watchers = vec![FileSystemWatcher {
             glob_pattern: GlobPattern::String("**/*".to_string()),
@@ -355,6 +375,8 @@ impl Backend {
         let _ = self.client.register_capability(vec![reg]).await;
     }
 
+    /// Procesa un evento de cambio de archivo individual (creado, modificado o eliminado).
+    /// Re-analiza el archivo si es `.py`, actualiza el store y notifica al frontend.
     async fn process_path_change(&self, path: &std::path::Path, typ: FileChangeType) {
         // Si se modificó .lspignore, recargar la lista y salir
         let root = { self.workspace_root.read().await.clone() };
@@ -425,6 +447,8 @@ impl Backend {
         guard.insert(original_path.to_path_buf(), value.clone());
     }
 
+    /// Actualiza el listado de `connections` con las llamadas a funciones encontradas en `value`.
+    /// Limpia primero las conexiones previas del archivo y las reconstruye desde cero.
     async fn save_function_reference(&self, original_path: &Path, value: &Value) {
         let binding = value.clone();
         let path_string = original_path.to_str().unwrap().to_string();
@@ -529,6 +553,8 @@ impl Backend {
         }
     }
 
+    /// Registra en `functions_in_file` todas las funciones y métodos definidos en `value`,
+    /// asociados a `original_path`. Usado para la detección de funciones sin uso.
     async fn save_functions(&self, original_path: &Path, value: &Value) {
         let binding = value.clone();
         let path_string = original_path.to_str().unwrap().to_string();
@@ -628,6 +654,7 @@ impl Backend {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
+    /// Manejador LSP `initialize`: resuelve y persiste la raíz del workspace.
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let resolved_root = resolve_workspace_root(&params)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -648,6 +675,7 @@ impl LanguageServer for Backend {
         })
     }
 
+    /// Manejador LSP `initialized`: registra watchers, carga `.lspignore` y dispara el análisis inicial.
     async fn initialized(&self, _: InitializedParams) {
         self.client
             .log_message(MessageType::INFO, "Server initialized!")
@@ -657,10 +685,13 @@ impl LanguageServer for Backend {
         self.analyze_workspace().await;
     }
 
+    /// Manejador LSP `shutdown`: termina el servidor limpiamente.
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
 
+    /// Manejador LSP `didSave`: re-analiza el archivo guardado, detecta cambios en firmas,
+    /// notifica al frontend y publica diagnósticos de funciones sin uso.
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri;
         let path = uri.to_file_path().unwrap_or_default();
@@ -819,6 +850,7 @@ impl LanguageServer for Backend {
         }
     }
 
+    /// Manejador LSP `didChangeWatchedFiles`: procesa en paralelo todos los eventos de cambio recibidos.
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let changes: Vec<(PathBuf, FileChangeType)> = params
             .changes

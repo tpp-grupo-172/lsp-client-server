@@ -18,7 +18,7 @@ export class GraphCache {
    */
   constructor(rawData) {
     const graph = buildGraphFromTreeSitter(rawData);
-
+    console.log(123123)
     /** @type {Map<string, InternalNode>} */
     this._nodes = graph.nodes;
 
@@ -77,6 +77,56 @@ export class GraphCache {
    * @param {string} folderId
    * @returns {{ nodes: { data: Record<string, unknown> }[], edges: { data: Record<string, unknown> }[] }}
    */
+  /**
+   * Returns functions/methods called by this file that are declared in other files,
+   * grouped by source file.
+   * @param {string} fileId
+   * @returns {Array<{ fileNode: InternalNode, fns: InternalNode[] }>}
+   */
+  getImportedFunctionsForFile(fileId) {
+    // Collect all function/method IDs declared in this file
+    const localFnIds = new Set();
+    for (const childId of (this._childrenMap.get(fileId) ?? [])) {
+      const child = this._nodes.get(childId);
+      if (!child) continue;
+      if (child.type === 'function') {
+        localFnIds.add(childId);
+      } else if (child.type === 'class') {
+        for (const methodId of (this._childrenMap.get(childId) ?? [])) {
+          localFnIds.add(methodId);
+        }
+      }
+    }
+
+    // Find calls edges from local functions to functions in other files
+    const seen = new Set();
+    /** @type {Map<string, { fileNode: InternalNode, fns: InternalNode[] }>} */
+    const grouped = new Map();
+
+    for (const edge of this._edges) {
+      if (edge.type !== 'calls') continue;
+      if (!localFnIds.has(edge.source)) continue;
+      if (seen.has(edge.target)) continue;
+
+      const targetNode = this._nodes.get(edge.target);
+      if (!targetNode) continue;
+      if (!targetNode.path || targetNode.path === fileId) continue;
+
+      const fileNode = this._nodes.get(targetNode.path);
+      if (!fileNode) continue;
+
+      seen.add(edge.target);
+      if (!grouped.has(fileNode.id)) {
+        grouped.set(fileNode.id, { fileNode, fns: [] });
+      }
+      const entry = grouped.get(fileNode.id);
+      if (entry) entry.fns.push(targetNode);
+    }
+
+    return [...grouped.values()];
+  }
+
+  /** @param {string} folderId */
   getLevelElements(folderId) {
     /** @type {{ data: Record<string, unknown> }[]} */
     const cytoscapeNodes = [];
@@ -93,24 +143,51 @@ export class GraphCache {
       });
       visibleIds.add(child.id);
 
-      // Archivos → agregar sus funciones como compound children
+      // Archivos → agregar funciones y clases (con sus métodos) como compound children
       if (child.type === 'file') {
-        for (const fn of this.getChildrenOf(child.id)) {
-          cytoscapeNodes.push({ data: { ...fn, parent: child.id } });
-          visibleIds.add(fn.id);
+        for (const fileChild of this.getChildrenOf(child.id)) {
+          if (fileChild.type === 'class') {
+            cytoscapeNodes.push({ data: { ...fileChild, parent: child.id } });
+            visibleIds.add(fileChild.id);
+            for (const method of this.getChildrenOf(fileChild.id)) {
+              cytoscapeNodes.push({ data: { ...method, parent: fileChild.id } });
+              visibleIds.add(method.id);
+            }
+          } else {
+            cytoscapeNodes.push({ data: { ...fileChild, parent: child.id } });
+            visibleIds.add(fileChild.id);
+          }
         }
       }
     }
 
-    // Solo edges cuyos dos extremos son visibles en este nivel
-    for (const edge of this._edges) {
-      if (
-        (edge.type === 'calls' || edge.type === 'imports') &&
-        visibleIds.has(edge.source) &&
-        visibleIds.has(edge.target)
-      ) {
-        cytoscapeEdges.push({ data: { ...edge } });
+    // Walk up parentMap to find the nearest ancestor that is visible at this level
+    /** @param {string} nodeId */
+    const getVisibleAncestor = (nodeId) => {
+      /** @type {string | null} */
+      let current = nodeId;
+      while (current !== null) {
+        if (visibleIds.has(current)) return current;
+        current = this._parentMap.get(current) ?? null;
       }
+      return null;
+    };
+
+    // Edges: fold endpoints inside collapsed folders to their visible ancestor
+    const addedEdgeKeys = new Set();
+    for (const edge of this._edges) {
+      if (edge.type !== 'calls' && edge.type !== 'imports') continue;
+
+      const src = getVisibleAncestor(edge.source);
+      const tgt = getVisibleAncestor(edge.target);
+
+      if (!src || !tgt || src === tgt) continue;
+
+      const key = `${edge.type}::${src}->${tgt}`;
+      if (addedEdgeKeys.has(key)) continue;
+      addedEdgeKeys.add(key);
+
+      cytoscapeEdges.push({ data: { id: key, source: src, target: tgt, type: edge.type } });
     }
 
     return { nodes: cytoscapeNodes, edges: cytoscapeEdges };
