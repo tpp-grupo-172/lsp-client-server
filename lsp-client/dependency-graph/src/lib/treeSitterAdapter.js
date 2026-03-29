@@ -121,6 +121,7 @@ export function buildGraphFromTreeSitter(data) {
 
             // Function / symbol nodes
             for (const fn of file.functions) {
+                console.log(1)
                 const fnId = `${sanitizeId(file.path)}::${sanitizeId(fn.name)}`;
                 addNode({
                     id: fnId,
@@ -134,11 +135,13 @@ export function buildGraphFromTreeSitter(data) {
 
             // Class nodes and their methods
             for (const cls of (file.classes ?? [])) {
+                console.log(2)
                 const classId = `${sanitizeId(file.path)}::${sanitizeId(cls.name)}`;
                 addNode({ id: classId, label: cls.name, type: 'class', path: file.path });
                 link(file.path, classId, 'declares');
 
                 for (const method of (cls.methods ?? [])) {
+                    console.log(3)
                     const methodId = `${classId}::${sanitizeId(method.name)}`;
                     addNode({
                         id: methodId,
@@ -174,10 +177,16 @@ export function buildGraphFromTreeSitter(data) {
             for (const fn of file.functions) {
                 for (const call of fn.function_calls) {
                     for (const importedFile of file.imports) {
+                        
+                        if (!importedFile.path) {
+                            continue
+                        }
+
                         const fnId = `${sanitizeId(importedFile.path)}::${sanitizeId(call.name)}`;
 
                         const node = nodes.get(fnId)
                         if (!node) continue;
+                        console.log(5)
                         const currentFnId = `${sanitizeId(file.path)}::${sanitizeId(fn.name)}`;
                         const pathNode = nodes.get(currentFnId)
                         if (!pathNode) continue;

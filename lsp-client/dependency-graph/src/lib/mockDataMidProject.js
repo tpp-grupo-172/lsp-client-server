@@ -5,7 +5,7 @@ export const mockTreeSitterData = {
       path: "projecto/validators.py",
       name: "validators.py",
       imports: [
-        { name: "re", path: null }
+        { name: "re", path: "__sys_lib__" }
       ],
       functions: [
         {
@@ -55,13 +55,13 @@ export const mockTreeSitterData = {
           return_type: null,
           function_calls: [
             { name: "register_user", import_name: "api.users" },
-            { name: "print", import_name: null },
+            { name: "print", import_name: "__sys_lib__" },
             { name: "add_product", import_name: "api.shop" },
-            { name: "print", import_name: null },
+            { name: "print", import_name: "__sys_lib__" },
             { name: "get_discounted_price", import_name: "api.shop" },
-            { name: "print", import_name: null },
+            { name: "print", import_name: "__sys_lib__" },
             { name: "place_order", import_name: "api.shop" },
-            { name: "print", import_name: null }
+            { name: "print", import_name: "__sys_lib__" }
           ]
         }
       ],
@@ -84,7 +84,7 @@ export const mockTreeSitterData = {
           return_type: "bool",
           function_calls: [
             { name: "format_currency", import_name: "utils.formatters" },
-            { name: "print", import_name: null }
+            { name: "print", import_name: "__sys_lib__" }
           ]
         },
         {
@@ -94,7 +94,7 @@ export const mockTreeSitterData = {
             { name: "name", param_type: "str", default_value: null }
           ],
           return_type: "bool",
-          function_calls: [{ name: "print", import_name: null }]
+          function_calls: [{ name: "print", import_name: "__sys_lib__" }]
         },
         {
           name: "send_stock_alert",
@@ -103,7 +103,7 @@ export const mockTreeSitterData = {
             { name: "stock", param_type: "int", default_value: null }
           ],
           return_type: "bool",
-          function_calls: [{ name: "print", import_name: null }]
+          function_calls: [{ name: "print", import_name: "__sys_lib__" }]
         },
         {
           name: "hola",
@@ -190,7 +190,7 @@ export const mockTreeSitterData = {
           name: "deactivate_user",
           parameters: [{ name: "email", param_type: "str", default_value: null }],
           return_type: "bool",
-          function_calls: [{ name: "print", import_name: null }]
+          function_calls: [{ name: "print", import_name: "__sys_lib__" }]
         }
       ],
       classes: []
@@ -224,7 +224,7 @@ export const mockTreeSitterData = {
             { name: "percent", param_type: "float", default_value: null }
           ],
           return_type: "float",
-          function_calls: [{ name: "round", import_name: null }]
+          function_calls: [{ name: "round", import_name: "__sys_lib__" }]
         }
       ],
       classes: [
