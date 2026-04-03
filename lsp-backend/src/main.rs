@@ -305,7 +305,7 @@ impl Backend {
                 if ft.is_dir() {
                     dirs.push(path);
                 } else if ft.is_file()
-                    && path.extension().and_then(|e| e.to_str()) == Some("py")
+                    && (path.extension().and_then(|e| e.to_str()) == Some("py") || path.extension().and_then(|e| e.to_str()) == Some("js")) 
                 {
                     py_files.push(path);
                 }
@@ -385,7 +385,7 @@ impl Backend {
             return;
         }
 
-        if path.extension().and_then(|e| e.to_str()) != Some("py") {
+        if path.extension().and_then(|e| e.to_str()) != Some("py") && path.extension().and_then(|e| e.to_str()) != Some("js") {
           return;
         }
 

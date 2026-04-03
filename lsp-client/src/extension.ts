@@ -28,7 +28,8 @@ export function activate(context: vscode.ExtensionContext) {
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "plaintext" },
-      { scheme: "file", language: "python" }
+      { scheme: "file", language: "python" },
+      { scheme: "file", language: "javascript" }
     ],
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
