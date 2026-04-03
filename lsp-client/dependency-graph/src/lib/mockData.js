@@ -99,5 +99,25 @@ export const mockTreeSitterData = {
       ],
       classes: []
     },
+    {
+      path: "folder3/file3.py",
+      name: "file3.py",
+      imports: [],
+      functions: [
+        {
+          name: "calcular_iva",
+          parameters: [],
+          return_type: null,
+          function_calls: []
+        },
+        {
+          name: "ganancias",
+          parameters: [],
+          return_type: null,
+          function_calls: []
+        }
+      ],
+      classes: []
+    },
   ]
 };
