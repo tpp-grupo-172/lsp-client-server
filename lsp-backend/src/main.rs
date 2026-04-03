@@ -47,6 +47,7 @@ struct Connections {
 struct FunctionsInFiles {
     file_src: String,
     function: String,
+    line: i64
 }
 
 #[derive(Debug)]
@@ -559,10 +560,17 @@ impl Backend {
 
             for method in methods {
                 if let Some(function_name) = method.get("name").and_then(|v| v.as_str()) {
+
+                    let line = method
+                        .get("line")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1);
+
                     let cloned_path = path_string.clone();
                     let functions_in_file = FunctionsInFiles {
                         file_src: cloned_path,
                         function: function_name.to_string(),
+                        line: line
                     };
 
                     let mut guard = self.functions_in_file.write().await;
@@ -578,10 +586,16 @@ impl Backend {
 
         for function in functions {
             if let Some(function_name) = function.get("name").and_then(|v| v.as_str()) {
+
+                let line = function
+                  .get("line")
+                  .and_then(|v| v.as_i64())
+                  .unwrap_or(1);
                 let cloned_path = path_string.clone();
                 let functions_in_file = FunctionsInFiles {
                     file_src: cloned_path,
                     function: function_name.to_string(),
+                    line: line
                 };
 
                 let mut guard = self.functions_in_file.write().await;
@@ -756,12 +770,12 @@ impl LanguageServer for Backend {
                         }
                     }
                     if unused_functions.len() > 0 {
-                        let mut by_file: HashMap<String, Vec<String>> = HashMap::new();
+                        let mut by_file: HashMap<String, Vec<FunctionsInFiles>> = HashMap::new();
                         for f in &unused_functions {
                             by_file
                                 .entry(f.file_src.clone())
                                 .or_default()
-                                .push(f.function.clone());
+                                .push(f.clone());
                         }
 
                         for (file_src, functions) in by_file {
@@ -770,16 +784,16 @@ impl LanguageServer for Backend {
                                 .map(|f| Diagnostic {
                                     range: Range {
                                         start: Position {
-                                            line: 0,
+                                            line: f.line as u32 - 1,
                                             character: 0,
                                         },
                                         end: Position {
-                                            line: 0,
+                                            line: f.line as u32 - 1,
                                             character: 0,
                                         },
                                     },
                                     severity: Some(DiagnosticSeverity::WARNING),
-                                    message: format!("Function '{}' is defined but never used", f),
+                                    message: format!("Function '{}' is defined but never used", f.function),
                                     source: Some("lsp-backend".to_string()),
                                     ..Default::default()
                                 })
