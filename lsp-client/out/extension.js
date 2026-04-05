@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
+const crypto = __importStar(require("crypto"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
@@ -52,7 +53,8 @@ function activate(context) {
     const clientOptions = {
         documentSelector: [
             { scheme: "file", language: "plaintext" },
-            { scheme: "file", language: "python" }
+            { scheme: "file", language: "python" },
+            { scheme: "file", language: "javascript" }
         ],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
@@ -80,8 +82,13 @@ function activate(context) {
             if (selection === 'Open files') {
                 data.files.forEach((file) => {
                     console.log("Recibido del LSP 3:", file);
-                    vscode.workspace.openTextDocument(file)
-                        .then(doc => vscode.window.showTextDocument(doc, { preview: false }));
+                    vscode.workspace.openTextDocument(file.path)
+                        .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
+                        .then(editor => {
+                        const position = new vscode.Position(file.line - 1, 0);
+                        editor.selection = new vscode.Selection(position, position);
+                        editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+                    });
                 });
             }
         });
@@ -100,10 +107,11 @@ function activate(context) {
         const htmlFile = await vscode.workspace.fs.readFile(htmlPath);
         let html = htmlFile.toString();
         const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
-        // Rewrite /assets/ paths to full webview URIs
+        const nonce = crypto.randomBytes(16).toString("base64url");
         html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
         html = html.replace(/ crossorigin/g, '');
-        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
+        html = html.replace(/<script/g, `<script nonce="${nonce}"`);
+        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
         html = html.replace('<head>', `<head>\n    ${csp}`);
         panel.webview.html = html;
         panel.webview.onDidReceiveMessage(message => {

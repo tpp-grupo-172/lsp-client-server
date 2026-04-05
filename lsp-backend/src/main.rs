@@ -17,6 +17,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
+use crate::utils::FileWarn;
+
 mod utils;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -37,6 +39,7 @@ struct LspFileMessage {
 struct Connections {
     file_src: String,
     file_use: String,
+    line: i64,
     function: String,
 }
 
@@ -44,6 +47,7 @@ struct Connections {
 struct FunctionsInFiles {
     file_src: String,
     function: String,
+    line: i64
 }
 
 #[derive(Debug)]
@@ -74,7 +78,7 @@ struct ProcessedJsonPayload {
 
 #[derive(Serialize, Debug, Deserialize)]
 struct ShowFilesToChangePayload {
-    files: Vec<String>,
+    files: Vec<FileWarn>,
 }
 
 impl Notification for ProcessedJson {
@@ -305,7 +309,7 @@ impl Backend {
                 if ft.is_dir() {
                     dirs.push(path);
                 } else if ft.is_file()
-                    && path.extension().and_then(|e| e.to_str()) == Some("py")
+                    && (path.extension().and_then(|e| e.to_str()) == Some("py") || path.extension().and_then(|e| e.to_str()) == Some("js")) 
                 {
                     py_files.push(path);
                 }
@@ -385,7 +389,7 @@ impl Backend {
             return;
         }
 
-        if path.extension().and_then(|e| e.to_str()) != Some("py") {
+        if path.extension().and_then(|e| e.to_str()) != Some("py") && path.extension().and_then(|e| e.to_str()) != Some("js") {
           return;
         }
 
@@ -501,12 +505,17 @@ impl Backend {
                         .get("import_name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("<sin nombre>");
+                    let line = functions_call_in_class
+                        .get("line")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
 
                     if let Some(path) = imports_hashmap.get(import_name) {
                         let cloned_path = path.clone();
                         let connection = Connections {
                             file_src: cloned_path,
                             file_use: path_string.clone(),
+                            line: line,
                             function: name.to_string(),
                         };
 
@@ -537,12 +546,17 @@ impl Backend {
                     .get("import_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("<sin nombre>");
+                let line = functions_call
+                    .get("line")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
 
                 if let Some(path) = imports_hashmap.get(import_name) {
                     let cloned_path = path.clone();
                     let connection = Connections {
                         file_src: cloned_path,
                         file_use: path_string.clone(),
+                        line: line,
                         function: name.to_string(),
                     };
 
@@ -572,10 +586,17 @@ impl Backend {
 
             for method in methods {
                 if let Some(function_name) = method.get("name").and_then(|v| v.as_str()) {
+
+                    let line = method
+                        .get("line")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1);
+
                     let cloned_path = path_string.clone();
                     let functions_in_file = FunctionsInFiles {
                         file_src: cloned_path,
                         function: function_name.to_string(),
+                        line: line
                     };
 
                     let mut guard = self.functions_in_file.write().await;
@@ -591,10 +612,16 @@ impl Backend {
 
         for function in functions {
             if let Some(function_name) = function.get("name").and_then(|v| v.as_str()) {
+
+                let line = function
+                  .get("line")
+                  .and_then(|v| v.as_i64())
+                  .unwrap_or(1);
                 let cloned_path = path_string.clone();
                 let functions_in_file = FunctionsInFiles {
                     file_src: cloned_path,
                     function: function_name.to_string(),
+                    line: line
                 };
 
                 let mut guard = self.functions_in_file.write().await;
@@ -774,12 +801,12 @@ impl LanguageServer for Backend {
                         }
                     }
                     if unused_functions.len() > 0 {
-                        let mut by_file: HashMap<String, Vec<String>> = HashMap::new();
+                        let mut by_file: HashMap<String, Vec<FunctionsInFiles>> = HashMap::new();
                         for f in &unused_functions {
                             by_file
                                 .entry(f.file_src.clone())
                                 .or_default()
-                                .push(f.function.clone());
+                                .push(f.clone());
                         }
 
                         for (file_src, functions) in by_file {
@@ -788,16 +815,16 @@ impl LanguageServer for Backend {
                                 .map(|f| Diagnostic {
                                     range: Range {
                                         start: Position {
-                                            line: 0,
+                                            line: f.line as u32 - 1,
                                             character: 0,
                                         },
                                         end: Position {
-                                            line: 0,
+                                            line: f.line as u32 - 1,
                                             character: 0,
                                         },
                                     },
                                     severity: Some(DiagnosticSeverity::WARNING),
-                                    message: format!("Function '{}' is defined but never used", f),
+                                    message: format!("Function '{}' is defined but never used", f.function),
                                     source: Some("lsp-backend".to_string()),
                                     ..Default::default()
                                 })
