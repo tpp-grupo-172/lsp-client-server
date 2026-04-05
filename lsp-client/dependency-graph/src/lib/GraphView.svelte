@@ -4,9 +4,12 @@
 	import cytoscape from 'cytoscape';
 	// @ts-ignore -- no type declarations for cytoscape-cose-bilkent
 	import coseBilkent from 'cytoscape-cose-bilkent';
+	// @ts-ignore -- no type declarations for cytoscape-edge-connections
+	import edgeConnections from 'cytoscape-edge-connections';
 	import './GraphView.css';
 
 	cytoscape.use(coseBilkent);
+	cytoscape.use(edgeConnections);
 
 	/** @type {import('./GraphCache').GraphCache} */
 	export let graphCache;
@@ -18,6 +21,9 @@
 	// ── State ───────────────────────────────────────────────────────────────────
 	/** @type {cytoscape.Core | null} */
 	let cy = null;
+
+	/** @type {any | null} */
+	let ec = null;
 
 	/** @type {string[]} Stack of folder IDs visited (index 0 = root) */
 	let navigationStack = [];
@@ -111,6 +117,45 @@
 		}
 	}
 
+	// ── Edge bundling ────────────────────────────────────────────────────────────
+	/**
+	 * Groups edges by (target, type). For each group with ≥2 edges, the first
+	 * becomes the trunk edge (source→target node) and the rest become branch edges
+	 * whose target is the trunk edge's ID — the library resolves that to the
+	 * trunk's aux node automatically.
+	 *
+	 * @param {{ data: Record<string, unknown> }[]} edges
+	 * @returns {{ data: Record<string, unknown> }[]}
+	 */
+	function groupEdgesForBundling(edges) {
+		/** @type {Map<string, { data: Record<string, unknown> }[]>} */
+		const groups = new Map();
+		for (const edge of edges) {
+			const key = `${edge.data.type}::${edge.data.target}`;
+			if (!groups.has(key)) groups.set(key, []);
+			/** @type {{ data: Record<string, unknown> }[]} */ (groups.get(key)).push(edge);
+		}
+
+		/** @type {{ data: Record<string, unknown> }[]} */
+		const result = [];
+		for (const group of groups.values()) {
+			// Trunk: first edge in the group — connects two node IDs as usual
+			result.push(group[0]);
+			// Branches: remaining edges point to the trunk edge's ID
+			for (let i = 1; i < group.length; i++) {
+				result.push({
+					data: {
+						id: `branch::${i}::${group[0].data.id}::${group[i].data.source}`,
+						source: group[i].data.source,
+						target: group[0].data.id, // edge ID → library resolves to aux node
+						type: group[i].data.type
+					}
+				});
+			}
+		}
+		return result;
+	}
+
 	// ── Core render ──────────────────────────────────────────────────────────────
 	/** @param {string} folderId */
 	function renderLevel(folderId) {
@@ -120,6 +165,7 @@
 		if (cy) {
 			cy.destroy();
 			cy = null;
+			ec = null;
 		}
 
 		if (!container) return;
@@ -128,7 +174,7 @@
 
 		cy = cytoscape(/** @type {any} */ ({
 			container,
-			elements: { nodes, edges },
+			elements: { nodes },
 			style: buildStyle(),
 			userZoomingEnabled: true,
 			userPanningEnabled: true,
@@ -142,6 +188,8 @@
 			wheelSensitivity: 0.5
 		}));
 
+		ec = cy.edgeConnections();
+
 		cy.layout(/** @type {any} */ ({
 			name: 'cose-bilkent',
 			nodeDimensionsIncludeLabels: true,
@@ -152,13 +200,15 @@
 			gravity: 0.15, // más compactación
 			numIter: 2500,
 			tile: true,
-			padding: 50,
+			padding: 1000,
 			randomize: false,
 			animate: false
 		})).run();
 
 		resolveAllOverlaps(cy);
 		cy.fit("60");
+
+		ec.addEdges(groupEdgesForBundling(edges));
 
 		// ── Event handlers ─────────────────────────────────────────────────────────
 		// Folder: navigate into
@@ -241,13 +291,27 @@
 	/** @returns {any[]} */
 	function buildStyle() {
 		return [
+			// ── Aux nodes (cytoscape-edge-connections midpoints) ────────────────────
+			{
+				selector: 'node.aux-node',
+				style: {
+					width: 8,
+					height: 8,
+					shape: 'ellipse',
+					'border-width': 0,
+					label: '',
+					'overlay-opacity': 0,
+					events: 'no'
+				}
+			},
+
 			// ── Folder nodes ────────────────────────────────────────────────────────
 			{
 				selector: 'node[type="folder"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					'background-color': '#2a2618',
 					'border-width': 2,
 					'border-color': '#e5c07b',
@@ -268,8 +332,8 @@
 				selector: 'node[type="file"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					'background-color': '#12243a',
 					'background-opacity': 0.85,
 					'border-width': 2,
@@ -291,8 +355,8 @@
 				selector: 'node[type="class"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					'background-color': '#25466e',
 					'background-opacity': 0.6,
 					'border-width': 2,
@@ -316,8 +380,8 @@
 				selector: 'node[type="function"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					padding: '6px',
 					'background-color': '#0d2b25',
 					'border-width': 1.5,
@@ -337,8 +401,8 @@
 				selector: 'node[type="method"]',
 				style: {
 					shape: 'round-rectangle',
-					width: 200,
-					height: 200,
+					width: 150,
+					height: 50,
 					padding: '6px',
 					'background-color': '#29271a',
 					'border-width': 1.5,
@@ -353,6 +417,17 @@
 				}
 			},
 
+			// ── External import source nodes ────────────────────────────────────────
+			// Nodes that are imported by files outside their own directory
+			{
+				selector: 'node[?externalImport]',
+				style: {
+					'background-color': '#2d1500',
+					'border-color': '#e06030',
+					color: '#e07848'
+				}
+			},
+
 			// ── Import edges (dashed) ────────────────────────────────────────────────
 			{
 				selector: 'edge[type="imports"]',
@@ -364,7 +439,9 @@
 					'target-arrow-color': '#5a6472',
 					'target-arrow-shape': 'none',
 					'arrow-scale': 0.9,
-					'curve-style': 'bezier',
+					'curve-style': 'round-taxi',
+					'taxi-direction': 'auto',
+					'taxi-turn': '50%',
 					'font-size': 10,
 					color: '#5a6472',
 					'edge-text-rotation': 'none',
@@ -384,7 +461,9 @@
 					'target-arrow-color': '#4ec9b0',
 					'target-arrow-shape': 'triangle',
 					'arrow-scale': 0.9,
-					'curve-style': 'bezier',
+					'curve-style': 'round-taxi',
+					'taxi-direction': 'auto',
+					'taxi-turn': '50%',
 					'font-size': 10,
 					color: '#4ec9b0',
 					'edge-text-rotation': 'none',
@@ -393,13 +472,6 @@
 					'text-background-padding': '2px'
 				}
 			},
-			{
-				selector: 'edge',
-				style: {
-					'curve-style': 'taxi',
-					'taxi-direction': 'horizontal'
-				}
-			}
 		];
 	}
 
@@ -457,6 +529,14 @@
 				<div class="legend-item">
 					<span class="legend-line solid"></span>
 					<span class="legend-label">calls</span>
+				</div>
+				<div class="legend-item">
+					<span class="legend-dot external"></span>
+					<span class="legend-label">externo al directorio</span>
+				</div>
+				<div class="legend-item">
+					<span class="legend-dot bundle-point"></span>
+					<span class="legend-label">punto de convergencia</span>
 				</div>
 			</div>
 		</nav>
