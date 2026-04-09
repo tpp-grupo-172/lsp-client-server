@@ -9,6 +9,7 @@ use tree_sitter_test::run_analysis;
 use blake3; // Hash para los paths
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -648,6 +649,11 @@ impl Backend {
         let binding = value.clone();
         let path_string = original_path.to_str().unwrap().to_string();
 
+        {
+            let mut f_in_files = self.functions_in_file.write().await;
+            f_in_files.retain(|c| c.file_src != path_string);
+        }
+
         let calsses = binding
             .get("classes")
             .and_then(|v| v.as_array())
@@ -875,8 +881,23 @@ impl LanguageServer for Backend {
                                     .await;
                             }
                         }
-                    }
+                    } 
                     if unused_functions.len() > 0 {
+                        {
+                            let store = self.store.read().await;
+                            for path in store.keys() {
+                                if let Ok(uri) = Url::from_file_path(path) {
+                                    self.client.publish_diagnostics(uri, vec![], None).await;
+                                }
+                            }
+                        }
+                        
+                        let mut seen = HashSet::new();
+                        let unused_functions: Vec<FunctionsInFiles> = unused_functions
+                            .into_iter()
+                            .filter(|f| seen.insert((f.file_src.clone(), f.function.clone(), f.line)))
+                            .collect();
+
                         let mut by_file: HashMap<String, Vec<FunctionsInFiles>> = HashMap::new();
                         for f in &unused_functions {
                             by_file
@@ -884,6 +905,8 @@ impl LanguageServer for Backend {
                                 .or_default()
                                 .push(f.clone());
                         }
+
+                        eprintln!("{:#?}", by_file);
 
                         for (file_src, functions) in by_file {
                             let diagnostics: Vec<Diagnostic> = functions
