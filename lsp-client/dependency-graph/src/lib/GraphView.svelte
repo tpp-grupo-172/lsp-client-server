@@ -41,6 +41,9 @@
 	}));
 
 	// ── Lifecycle ────────────────────────────────────────────────────────────────
+	/** @type {import('./GraphCache').GraphCache | null} */
+	let _mountedCache = null;
+
 	onMount(() => {
 		const rootId = graphCache.getRootId();
 		console.log(graphCache);
@@ -48,7 +51,15 @@
 			navigationStack = [rootId];
 			renderLevel(rootId);
 		}
+		_mountedCache = graphCache;
 	});
+
+	// Cuando llega nueva data (graphCache cambia de referencia después del mount)
+	$: if (graphCache !== _mountedCache && _mountedCache !== null && cy) {
+		_mountedCache = graphCache;
+		const currentId = navigationStack[navigationStack.length - 1] ?? graphCache.getRootId();
+		refreshLevel(currentId);
+	}
 
 	onDestroy(() => {
 		cy?.destroy();
@@ -79,41 +90,45 @@
 	// ── Overlap resolution ──────────────────────────────────────────────────────
 	/** @param {import('cytoscape').Core} cyInstance */
 	function resolveAllOverlaps(cyInstance) {
-		const MARGIN = 10;
-		const topLevel = cyInstance.nodes(':orphan');
+		const MARGIN = 100;
+		const nodes = cyInstance.nodes(':orphan').toArray();
 
 		let changed = true;
 		let passes = 0;
 
-		while (changed && passes < 20) {
+		while (changed && passes < 50) {
 			changed = false;
 			passes++;
 
-			topLevel.forEach((node) => {
-				topLevel.not(node).forEach((other) => {
-					const bb = node.boundingBox();
-					const obb = other.boundingBox();
+			for (let i = 0; i < nodes.length; i++) {
+				for (let j = i + 1; j < nodes.length; j++) {
+					const a = nodes[i];
+					const b = nodes[j];
+					const bb = a.boundingBox();
+					const obb = b.boundingBox();
 
 					const overlapX = Math.min(bb.x2, obb.x2) - Math.max(bb.x1, obb.x1) + MARGIN;
 					const overlapY = Math.min(bb.y2, obb.y2) - Math.max(bb.y1, obb.y1) + MARGIN;
 
 					if (overlapX > 0 && overlapY > 0) {
-						const nodeCx = (bb.x1 + bb.x2) / 2;
-						const otherCx = (obb.x1 + obb.x2) / 2;
-						const nodeCy = (bb.y1 + bb.y2) / 2;
-						const otherCy = (obb.y1 + obb.y2) / 2;
+						const dx = (bb.x1 + bb.x2) / 2 - (obb.x1 + obb.x2) / 2 || 1;
+						const dy = (bb.y1 + bb.y2) / 2 - (obb.y1 + obb.y2) / 2 || 1;
 
 						if (overlapX <= overlapY) {
-							const dir = nodeCx >= otherCx ? 1 : -1;
-							node.position('x', node.position('x') + dir * overlapX);
+							const half = overlapX / 2;
+							const dir = dx >= 0 ? 1 : -1;
+							a.position('x', a.position('x') + dir * half);
+							b.position('x', b.position('x') - dir * half);
 						} else {
-							const dir = nodeCy >= otherCy ? 1 : -1;
-							node.position('y', node.position('y') + dir * overlapY);
+							const half = overlapY / 2;
+							const dir = dy >= 0 ? 1 : -1;
+							a.position('y', a.position('y') + dir * half);
+							b.position('y', b.position('y') - dir * half);
 						}
 						changed = true;
 					}
-				});
-			});
+				}
+			}
 		}
 	}
 
@@ -156,6 +171,68 @@
 		return result;
 	}
 
+	// ── Incremental update (preserva posiciones) ─────────────────────────────────
+	/** @param {string} folderId */
+	function refreshLevel(folderId) {
+		if (!cy || !ec) return;
+		selectedNode = null;
+
+		const { nodes, edges } = graphCache.getLevelElements(folderId);
+		const newNodeMap = /** @type {Map<string, { data: Record<string, unknown> }>} */ (
+			new Map(nodes.map((n) => [/** @type {string} */ (n.data.id), n]))
+		);
+
+		// Guardar posiciones de nodos existentes
+		/** @type {Map<string, { x: number, y: number }>} */
+		const savedPos = new Map();
+		cy.nodes().not('.aux-node').forEach((n) => {
+			savedPos.set(n.id(), { ...n.position() });
+		});
+
+		// Limpiar edges y aux-nodes del plugin
+		cy.edges().remove();
+		cy.nodes('.aux-node').remove();
+
+		cy.batch(() => {
+			// Eliminar nodos que ya no existen
+			cy.nodes().forEach((n) => {
+				if (!newNodeMap.has(n.id())) n.remove();
+			});
+
+			// Agregar o actualizar nodos
+			for (const [id, nodeData] of newNodeMap) {
+				const existing = cy.getElementById(id);
+				if (existing.length === 0) {
+					cy.add({ group: 'nodes', data: nodeData.data });
+				} else {
+					existing.data(nodeData.data);
+				}
+			}
+
+			// Restaurar posiciones de nodos que sobrevivieron
+			savedPos.forEach((pos, id) => {
+				const node = cy.getElementById(id);
+				if (node.length) node.position(pos);
+			});
+
+			// Posicionar nodos nuevos en el centro del viewport
+			const ext = cy.extent();
+			const cx = (ext.x1 + ext.x2) / 2;
+			const cy_ = (ext.y1 + ext.y2) / 2;
+			let i = 0;
+			cy.nodes().not('.aux-node').forEach((n) => {
+				if (!savedPos.has(n.id())) {
+					n.position({ x: cx + i * 60, y: cy_ + i * 60 });
+					i++;
+				}
+			});
+		});
+
+		// Re-agregar edges vía edge-connections
+		ec = cy.edgeConnections();
+		ec.addEdges(groupEdgesForBundling(edges));
+	}
+
 	// ── Core render ──────────────────────────────────────────────────────────────
 	/** @param {string} folderId */
 	function renderLevel(folderId) {
@@ -183,7 +260,7 @@
 			maxZoom: 4,
 			zoom: 1,
 			zoomingEnabled: true,
-			pixelRatio: 1,
+			pixelRatio: window.devicePixelRatio ?? 1,
 			motionBlur: true,
 			wheelSensitivity: 0.5
 		}));
@@ -291,6 +368,16 @@
 	/** @returns {any[]} */
 	function buildStyle() {
 		return [
+			// ── Z-order: nodes siempre por encima de edges ──────────────────────────
+			{
+				selector: 'node',
+				style: { 'z-index': 10 }
+			},
+			{
+				selector: 'edge',
+				style: { 'z-index': 1 }
+			},
+
 			// ── Aux nodes (cytoscape-edge-connections midpoints) ────────────────────
 			{
 				selector: 'node.aux-node',

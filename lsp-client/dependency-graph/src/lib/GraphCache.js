@@ -18,7 +18,6 @@ export class GraphCache {
    */
   constructor(rawData) {
     const graph = buildGraphFromTreeSitter(rawData);
-    console.log(123123)
     /** @type {Map<string, InternalNode>} */
     this._nodes = graph.nodes;
 
@@ -36,7 +35,7 @@ export class GraphCache {
 
   /** @returns {string} */
   getRootId() {
-    return '__root__';
+    return 'root';
   }
 
   /**
@@ -207,7 +206,7 @@ export class GraphCache {
 
       if (!src || !tgt || src === tgt) continue;
 
-      const key = `${edge.type}::${src}->${tgt}`;
+      const key = `${edge.type}|${src}|${tgt}`;
       if (addedEdgeKeys.has(key)) continue;
       addedEdgeKeys.add(key);
 
