@@ -42,6 +42,8 @@ struct Connections {
     file_src: String,
     file_use: String,
     line: i64,
+    start_col: usize,
+    end_col: usize,
     function: String,
 }
 
@@ -49,7 +51,9 @@ struct Connections {
 struct FunctionsInFiles {
     file_src: String,
     function: String,
-    line: i64
+    line: i64,
+    name_start_col: usize,
+    name_end_col: usize,
 }
 
 #[derive(Debug)]
@@ -91,6 +95,20 @@ impl Notification for ProcessedJson {
 impl Notification for ShowFilesToChange {
     type Params = ShowFilesToChangePayload;
     const METHOD: &'static str = "lsp-server/showFilesToChange";
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RenameRequest {
+    file_path: String,
+    old_name: String,
+    new_name: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RenameResult {
+    success: bool,
+    error: Option<String>,
+    files_edited: Option<Vec<String>>,
 }
 
 // Helpers para manejo de paths
@@ -532,6 +550,14 @@ impl Backend {
                     .get("line")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
+                let start_col = function_call
+                    .get("start_col")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let end_col = function_call
+                    .get("end_col")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
 
                 if let Some(import_module) = import_name {
                     // Caso normal — import directo
@@ -540,12 +566,14 @@ impl Backend {
                             file_src: path.clone(),
                             file_use: path_string.to_string(),
                             line,
+                            start_col,
+                            end_col,
                             function: name.to_string(),
                         });
                     }
                 } else if let Some(obj_name) = object_name {
                     // Caso nuevo — resolver via local_variables + return_type + clase
-                    
+
                     // 1. Buscar assigned_from en local_variables
                     let assigned_from = local_variables
                         .iter()
@@ -570,6 +598,8 @@ impl Backend {
                                         file_src: class_file,
                                         file_use: path_string.to_string(),
                                         line,
+                                        start_col,
+                                        end_col,
                                         function: name.to_string(),
                                     });
                                 }
@@ -590,6 +620,8 @@ impl Backend {
                             file_src: path_string.to_string(),
                             file_use: path_string.to_string(),
                             line,
+                            start_col,
+                            end_col,
                             function: name.to_string(),
                         });
                     }
@@ -685,17 +717,16 @@ impl Backend {
 
             for method in methods {
                 if let Some(function_name) = method.get("name").and_then(|v| v.as_str()) {
+                    let line = method.get("line").and_then(|v| v.as_i64()).unwrap_or(1);
+                    let name_start_col = method.get("name_start_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let name_end_col = method.get("name_end_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-                    let line = method
-                        .get("line")
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(1);
-
-                    let cloned_path = path_string.clone();
                     let functions_in_file = FunctionsInFiles {
-                        file_src: cloned_path,
+                        file_src: path_string.clone(),
                         function: function_name.to_string(),
-                        line: line
+                        line,
+                        name_start_col,
+                        name_end_col,
                     };
 
                     let mut guard = self.functions_in_file.write().await;
@@ -711,16 +742,16 @@ impl Backend {
 
         for function in functions {
             if let Some(function_name) = function.get("name").and_then(|v| v.as_str()) {
+                let line = function.get("line").and_then(|v| v.as_i64()).unwrap_or(1);
+                let name_start_col = function.get("name_start_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let name_end_col = function.get("name_end_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-                let line = function
-                  .get("line")
-                  .and_then(|v| v.as_i64())
-                  .unwrap_or(1);
-                let cloned_path = path_string.clone();
                 let functions_in_file = FunctionsInFiles {
-                    file_src: cloned_path,
+                    file_src: path_string.clone(),
                     function: function_name.to_string(),
-                    line: line
+                    line,
+                    name_start_col,
+                    name_end_col,
                 };
 
                 let mut guard = self.functions_in_file.write().await;
@@ -775,6 +806,127 @@ impl Backend {
         let root = { self.workspace_root.read().await.clone() };
         let base = cache_root_for_workspace(&root);
         cleanup_orphan_entries_in(&base).await;
+    }
+
+    /// Renombra una función en su definición y en todos sus call sites.
+    /// Recibe el path relativo al workspace, el nombre actual y el nuevo nombre.
+    async fn rename_function(&self, params: RenameRequest) -> tower_lsp::jsonrpc::Result<RenameResult> {
+        let root = { self.workspace_root.read().await.clone() };
+        let old_name = &params.old_name;
+        let new_name = &params.new_name;
+
+        // Resolver el path relativo que viene del frontend al path absoluto
+        let abs_file_path = root.join(&params.file_path)
+            .to_string_lossy()
+            .to_string();
+
+        // 1. Buscar la definición
+        let definition = {
+            let guard = self.functions_in_file.read().await;
+            guard.iter()
+                .find(|f| f.function == *old_name && f.file_src == abs_file_path)
+                .cloned()
+        };
+
+        let Some(def) = definition else {
+            return Ok(RenameResult {
+                success: false,
+                error: Some(format!("Function '{}' not found in '{}'", old_name, params.file_path)),
+                files_edited: None,
+            });
+        };
+
+        // 2. Recopilar todos los call sites que apuntan a esta definición
+        let call_sites: Vec<Connections> = {
+            let guard = self.connections.read().await;
+            guard.iter()
+                .filter(|c| c.function == *old_name && c.file_src == def.file_src)
+                .cloned()
+                .collect()
+        };
+
+        // 3. Construir mapa: archivo → lista de (línea, col_start, col_end)
+        //    Usamos un HashMap<String, HashMap<usize, Vec<(usize, usize)>>> para agrupar
+        //    edits por archivo y luego por línea.
+        let mut edits: HashMap<String, HashMap<usize, Vec<(usize, usize)>>> = HashMap::new();
+
+        // Definición
+        edits
+            .entry(def.file_src.clone())
+            .or_default()
+            .entry(def.line as usize)
+            .or_default()
+            .push((def.name_start_col, def.name_end_col));
+
+        // Call sites
+        for call in &call_sites {
+            edits
+                .entry(call.file_use.clone())
+                .or_default()
+                .entry(call.line as usize)
+                .or_default()
+                .push((call.start_col, call.end_col));
+        }
+
+        // 4. Aplicar edits en cada archivo
+        let mut files_edited: Vec<String> = vec![];
+
+        for (file_path, lines_map) in &edits {
+            let content = match std::fs::read_to_string(file_path) {
+                Ok(c) => c,
+                Err(e) => return Ok(RenameResult {
+                    success: false,
+                    error: Some(format!("Cannot read '{}': {}", file_path, e)),
+                    files_edited: None,
+                }),
+            };
+
+            let trailing_newline = content.ends_with('\n');
+            let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+            for (line_num, col_edits) in lines_map {
+                let idx = line_num - 1;
+                if idx >= lines.len() { continue; }
+
+                // Aplicar de derecha a izquierda para no desplazar columnas
+                let mut col_edits = col_edits.clone();
+                col_edits.sort_by(|a, b| b.0.cmp(&a.0));
+
+                let line = &mut lines[idx];
+                for (sc, ec) in col_edits {
+                    if sc <= ec && ec <= line.len() {
+                        line.replace_range(sc..ec, new_name);
+                    }
+                }
+            }
+
+            let mut new_content = lines.join("\n");
+            if trailing_newline {
+                new_content.push('\n');
+            }
+
+            if let Err(e) = std::fs::write(file_path, &new_content) {
+                return Ok(RenameResult {
+                    success: false,
+                    error: Some(format!("Cannot write '{}': {}", file_path, e)),
+                    files_edited: None,
+                });
+            }
+
+            // Invalidar caché del archivo editado
+            let path_buf = PathBuf::from(file_path);
+            let base = cache_root_for_workspace(&root);
+            let cache_file = base.join(format!("{}.json", hash_path(&path_buf)));
+            let _ = std::fs::remove_file(cache_file);
+
+            files_edited.push(file_path.clone());
+        }
+
+        Ok(RenameResult {
+            success: true,
+            error: None,
+            files_edited: Some(files_edited),
+        })
     }
 }
 
@@ -1017,14 +1169,16 @@ impl LanguageServer for Backend {
 async fn main() {
     eprintln!("Server is up and running");
 
-    let (service, socket) = LspService::new(|client| Backend {
+    let (service, socket) = LspService::build(|client| Backend {
         client,
         store: RwLock::new(HashMap::new()),
         connections: RwLock::new(vec![]),
         functions_in_file: RwLock::new(vec![]),
         workspace_root: RwLock::new(std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
         ignored_folders: RwLock::new(vec![]),
-    });
+    })
+    .custom_method("lsp-server/renameFunction", Backend::rename_function)
+    .finish();
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
         .serve(service)
         .await;
