@@ -552,89 +552,200 @@ impl Backend {
             None
         };
 
+        // Helper closure: dado el archivo que define una clase, su nombre y el nombre de un método,
+        // devuelve el return_type de ese método (para resolver cadenas de N niveles).
+        let find_method_return_type = |class_file: &str, class_name: &str, method_name: &str| -> Option<String> {
+            let file_value = store_snapshot.get(&PathBuf::from(class_file))?;
+            let classes = file_value.get("classes")?.as_array()?;
+            for class in classes {
+                if class.get("name")?.as_str()? == class_name {
+                    let methods = class.get("methods")?.as_array()?;
+                    for method in methods {
+                        if method.get("name")?.as_str()? == method_name {
+                            return method.get("return_type")
+                                .filter(|v| !v.is_null())
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                }
+            }
+            None
+        };
+
         let process_function_calls = |
             function_calls: &Vec<Value>,
             local_variables: &Vec<Value>,
+            parameters: &Vec<Value>,
             path_string: &str,
             imports_hashmap: &HashMap<String, String>,
         | -> Vec<Connections> {
             let mut new_connections = vec![];
 
+            // ── Pre-pass: construir dos mapas para habilitar resolución de cadenas N-profundas
+            //
+            // call_sources: call_name → archivo donde ese método/función está definido
+            //               (se usa como file_src en la Connection)
+            // call_contexts: call_name → (tipo_retornado, archivo_que_define_ese_tipo)
+            //               (se usa para resolver el SIGUIENTE eslabón de la cadena)
+            let mut call_sources: HashMap<String, String>          = HashMap::new();
+            let mut call_contexts: HashMap<String, (String, String)> = HashMap::new();
+
+            for fc in function_calls.iter() {
+                let fc_name   = fc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let fc_import = fc.get("import_name").and_then(|v| v.as_str());
+                let fc_chain  = fc.get("chain_source_fn").and_then(|v| v.as_str());
+                let fc_object = fc.get("object_name").and_then(|v| v.as_str());
+
+                // Las llamadas encadenadas y las de objeto se resuelven en las pasadas siguientes
+                if fc_chain.is_some() || fc_object.is_some() { continue; }
+
+                if let Some(module) = fc_import {
+                    // Función importada directamente: module.func() o func() de `from X import func`
+                    if let Some(src_file) = imports_hashmap.get(module) {
+                        call_sources.insert(fc_name.to_string(), src_file.clone());
+                        if let Some(rt) = resolve_return_type(module, fc_name) {
+                            if let Some(rt_file) = find_class_file(&rt) {
+                                call_contexts.insert(fc_name.to_string(), (rt, rt_file));
+                            }
+                        }
+                    }
+                } else {
+                    // Función del mismo archivo
+                    let local_fn = binding.get("functions").and_then(|v| v.as_array())
+                        .and_then(|fns| fns.iter().find(|f| {
+                            f.get("name").and_then(|n| n.as_str()) == Some(fc_name)
+                        }));
+                    if local_fn.is_some() {
+                        call_sources.insert(fc_name.to_string(), path_string.to_string());
+                        if let Some(rt) = local_fn
+                            .and_then(|f| f.get("return_type"))
+                            .filter(|v| !v.is_null())
+                            .and_then(|v| v.as_str())
+                        {
+                            if let Some(rt_file) = find_class_file(rt) {
+                                call_contexts.insert(fc_name.to_string(), (rt.to_string(), rt_file));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Pasada iterativa: resolver cadenas encadenadas de cualquier profundidad
+            //
+            // Ejemplo: hola().chau().pepe()
+            //   iteración 1 → resuelve chau (chain_source_fn="hola", hola ya está en call_contexts)
+            //   iteración 2 → resuelve pepe (chain_source_fn="chau", chau ya está en call_contexts)
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for fc in function_calls.iter() {
+                    let fc_name  = fc.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let fc_chain = fc.get("chain_source_fn").and_then(|v| v.as_str());
+
+                    let Some(source_fn) = fc_chain else { continue };
+                    if call_sources.contains_key(fc_name) { continue; }
+
+                    if let Some((source_type, source_file)) = call_contexts.get(source_fn).cloned() {
+                        // El método fc_name vive en la clase source_type, definida en source_file
+                        call_sources.insert(fc_name.to_string(), source_file.clone());
+
+                        // Intentar propagar el return_type para el siguiente eslabón
+                        if let Some(rt) = find_method_return_type(&source_file, &source_type, fc_name) {
+                            if let Some(rt_file) = find_class_file(&rt) {
+                                call_contexts.insert(fc_name.to_string(), (rt, rt_file));
+                            }
+                        }
+                        changed = true;
+                    }
+                }
+            }
+
+            // ── Loop principal: construir Connections usando los mapas pre-computados
             for function_call in function_calls {
-                let name = function_call
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("<sin nombre>");
-                let import_name = function_call
-                    .get("import_name")
-                    .and_then(|v| v.as_str());
-                let object_name = function_call
-                    .get("object_name")
-                    .and_then(|v| v.as_str());
-                let line = function_call
-                    .get("line")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let start_col = function_call
-                    .get("start_col")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let end_col = function_call
-                    .get("end_col")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let name        = function_call.get("name").and_then(|v| v.as_str()).unwrap_or("<sin nombre>");
+                let import_name = function_call.get("import_name").and_then(|v| v.as_str());
+                let object_name = function_call.get("object_name").and_then(|v| v.as_str());
+                let chain_source_fn = function_call.get("chain_source_fn").and_then(|v| v.as_str());
+                let line      = function_call.get("line").and_then(|v| v.as_i64()).unwrap_or(0);
+                let start_col = function_call.get("start_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let end_col   = function_call.get("end_col").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
                 if let Some(import_module) = import_name {
-                    // Caso normal — import directo
+                    // Caso 1: llamada directa a función importada
                     if let Some(path) = imports_hashmap.get(import_module) {
                         new_connections.push(Connections {
-                            file_src: path.clone(),
-                            file_use: path_string.to_string(),
-                            line,
-                            start_col,
-                            end_col,
-                            function: name.to_string(),
+                            file_src: path.clone(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
                         });
                     }
                 } else if let Some(obj_name) = object_name {
-                    // Caso nuevo — resolver via local_variables + return_type + clase
-
-                    // 1. Buscar assigned_from en local_variables
-                    let assigned_from = local_variables
-                        .iter()
+                    // Caso 2: método sobre variable  →  obj.method()
+                    // Prioridad: local_variables (asignada desde función) → parameters (tipo anotado)
+                    let assigned_from = local_variables.iter()
                         .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name))
                         .and_then(|v| v.get("assigned_from"))
                         .and_then(|v| v.as_str());
 
                     if let Some(assigned_func) = assigned_from {
-                        // 2. Buscar de qué módulo viene assigned_func
-                        let source_import = function_calls
-                            .iter()
+                        let source_import = function_calls.iter()
                             .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
                             .and_then(|c| c.get("import_name"))
                             .and_then(|v| v.as_str());
 
-                        if let Some(import_module) = source_import {
-                            // 3. Resolver return_type de assigned_func
-                            if let Some(return_type) = resolve_return_type(import_module, assigned_func) {
-                                // 4. Buscar el archivo que define esa clase
+                        if let Some(module) = source_import {
+                            if let Some(return_type) = resolve_return_type(module, assigned_func) {
                                 if let Some(class_file) = find_class_file(&return_type) {
                                     new_connections.push(Connections {
-                                        file_src: class_file,
-                                        file_use: path_string.to_string(),
-                                        line,
-                                        start_col,
-                                        end_col,
-                                        function: name.to_string(),
+                                        file_src: class_file, file_use: path_string.to_string(),
+                                        line, start_col, end_col, function: name.to_string(),
                                     });
                                 }
                             }
                         }
+                    } else {
+                        // Fallback: obj_name podría ser un parámetro con tipo anotado
+                        // ej: def f(product: Product) → product.price()
+                        let param_type = parameters.iter()
+                            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(obj_name))
+                            .and_then(|p| p.get("param_type"))
+                            .and_then(|v| v.as_str());
+
+                        if let Some(type_annotation) = param_type {
+                            // Extraer el tipo base para anotaciones comunes:
+                            //   "Product"           → "Product"
+                            //   "Optional[Product]" → "Product"
+                            //   "Product | None"    → "Product"
+                            //   '"Product"'         → "Product"  (forward ref)
+                            let base_type = {
+                                let t = type_annotation.trim().trim_matches('"').trim_matches('\'');
+                                if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
+                                    inner.trim()
+                                } else if let Some(base) = t.split('|').next() {
+                                    base.trim()
+                                } else {
+                                    t
+                                }
+                            };
+                            if let Some(class_file) = find_class_file(base_type) {
+                                new_connections.push(Connections {
+                                    file_src: class_file, file_use: path_string.to_string(),
+                                    line, start_col, end_col, function: name.to_string(),
+                                });
+                            }
+                        }
+                    }
+                } else if let Some(source_fn) = chain_source_fn {
+                    // Caso 3: llamada encadenada  →  resuelto en la pasada iterativa
+                    if let Some(src_file) = call_sources.get(source_fn) {
+                        new_connections.push(Connections {
+                            file_src: src_file.clone(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
+                        });
                     }
                 } else {
-                    let defined_in_same_file = binding
-                        .get("functions")
-                        .and_then(|v| v.as_array())
+                    // Caso 4: llamada local directa (misma función en mismo archivo)
+                    let defined_in_same_file = binding.get("functions").and_then(|v| v.as_array())
                         .map(|funcs| funcs.iter().any(|f| {
                             f.get("name").and_then(|n| n.as_str()) == Some(name)
                         }))
@@ -642,12 +753,8 @@ impl Backend {
 
                     if defined_in_same_file {
                         new_connections.push(Connections {
-                            file_src: path_string.to_string(),
-                            file_use: path_string.to_string(),
-                            line,
-                            start_col,
-                            end_col,
-                            function: name.to_string(),
+                            file_src: path_string.to_string(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
                         });
                     }
                 }
@@ -678,10 +785,16 @@ impl Backend {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                let method_parameters = method
+                    .get("parameters")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
 
                 let new_connections = process_function_calls(
                     function_calls,
                     &local_variables,
+                    &method_parameters,
                     &path_string,
                     &imports_hashmap,
                 );
@@ -707,10 +820,16 @@ impl Backend {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let func_parameters = func
+                .get("parameters")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
 
             let new_connections = process_function_calls(
                 function_calls,
                 &local_variables,
+                &func_parameters,
                 &path_string,
                 &imports_hashmap,
             );
