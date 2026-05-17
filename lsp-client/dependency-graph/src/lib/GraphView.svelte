@@ -760,6 +760,7 @@
 		</nav>
 
 		<button
+			type="button"
 			class="export-btn"
 			on:click={exportPng}
 			disabled={exportState === 'generating'}
