@@ -43,6 +43,10 @@
 	/** @type {string | null} */
 	let _prevNodeId = null;
 
+	// ── Export state ─────────────────────────────────────────────────────────────
+	/** @type {'idle' | 'generating'} */
+	let exportState = 'idle';
+
 	// Reset rename state when selected node changes
 	$: {
 		if (selectedNode?.id !== _prevNodeId) {
@@ -642,6 +646,60 @@
 		method: '#dcdcaa',
 		class: '#c586c0'
 	};
+
+	async function exportPng() {
+		if (exportState === 'generating') return;
+		exportState = 'generating';
+
+		// Yield to event loop so Svelte can update button to "Generating…" state
+		await new Promise((r) => setTimeout(r, 0));
+
+		const hiddenDiv = document.createElement('div');
+		hiddenDiv.style.cssText =
+			'position:absolute;left:-9999px;top:-9999px;width:3000px;height:2000px;pointer-events:none;';
+		document.body.appendChild(hiddenDiv);
+
+		const { nodes, edges } = graphCache.getAllElements();
+
+		const tempCy = cytoscape(/** @type {any} */ ({
+			container: hiddenDiv,
+			elements: { nodes, edges },
+			style: buildStyle(),
+			userZoomingEnabled: false,
+			userPanningEnabled: false,
+			boxSelectionEnabled: false,
+			pixelRatio: window.devicePixelRatio ?? 1
+		}));
+
+		tempCy.layout(/** @type {any} */ ({
+			name: 'cose-bilkent',
+			nodeDimensionsIncludeLabels: true,
+			edgeElasticity: 0.08,
+			nodeRepulsion: 4500,
+			idealEdgeLength: 120,
+			nestingFactor: 0.1,
+			gravity: 0.15,
+			numIter: 2500,
+			tile: true,
+			padding: 60,
+			randomize: false,
+			animate: false
+		})).run();
+
+		const dataUrl = tempCy.png({ output: 'base64uri', full: true, scale: 2, bg: '#1e1e1e' });
+
+		tempCy.destroy();
+		document.body.removeChild(hiddenDiv);
+
+		const a = document.createElement('a');
+		a.href = dataUrl;
+		a.download = 'dependency-graph.png';
+		document.body.appendChild(a);
+		a.click();
+		document.body.removeChild(a);
+
+		exportState = 'idle';
+	}
 
 	/** @param {string | undefined} path */
 	function shortPath(path) {
