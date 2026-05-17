@@ -651,6 +651,7 @@
 		if (exportState === 'generating') return;
 		exportState = 'generating';
 
+		// Yield so Svelte flushes the exportState update before blocking the thread with layout.
 		await new Promise((r) => setTimeout(r, 0));
 
 		const hiddenDiv = document.createElement('div');
@@ -663,6 +664,8 @@
 		try {
 			const { nodes, edges } = graphCache.getAllElements();
 
+			// Edge bundling (cytoscape-edge-connections) is intentionally skipped here —
+			// the export uses plain Cytoscape edges to avoid aux-node artifacts in the PNG.
 			tempCy = cytoscape(/** @type {any} */ ({
 				container: hiddenDiv,
 				elements: { nodes, edges },
@@ -695,6 +698,8 @@
 			document.body.appendChild(a);
 			a.click();
 			document.body.removeChild(a);
+		} catch (err) {
+			console.error('[exportPng] failed:', err);
 		} finally {
 			tempCy?.destroy();
 			document.body.removeChild(hiddenDiv);
