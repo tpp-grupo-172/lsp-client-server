@@ -215,4 +215,59 @@ export class GraphCache {
 
     return { nodes: cytoscapeNodes, edges: cytoscapeEdges };
   }
+
+  /**
+   * Returns all content nodes (files, functions, classes, methods) and all
+   * calls/imports edges across the entire project — not scoped to any level.
+   * Used for full-graph PNG export.
+   *
+   * @returns {{ nodes: { data: Record<string, unknown> }[], edges: { data: Record<string, unknown> }[] }}
+   */
+  getAllElements() {
+    /** @type {{ data: Record<string, unknown> }[]} */
+    const cytoscapeNodes = [];
+    /** @type {{ data: Record<string, unknown> }[]} */
+    const cytoscapeEdges = [];
+
+    for (const [id, node] of this._nodes) {
+      if (node.type === 'folder') continue;
+
+      /** @type {Record<string, unknown>} */
+      const data = { ...node };
+
+      if (node.type === 'file') {
+        data.displayLabel = '📄  ' + node.label;
+      }
+
+      const parentId = this._parentMap.get(id);
+      if (parentId) {
+        const parentNode = this._nodes.get(parentId);
+        if (parentNode && parentNode.type !== 'folder') {
+          data.parent = parentId;
+        }
+      }
+
+      cytoscapeNodes.push({ data });
+    }
+
+    const addedEdgeKeys = new Set();
+    for (const edge of this._edges) {
+      if (edge.type !== 'calls' && edge.type !== 'imports') continue;
+
+      const sourceNode = this._nodes.get(edge.source);
+      const targetNode = this._nodes.get(edge.target);
+      if (!sourceNode || !targetNode) continue;
+      if (sourceNode.type === 'folder' || targetNode.type === 'folder') continue;
+
+      const key = `${edge.type}|${edge.source}|${edge.target}`;
+      if (addedEdgeKeys.has(key)) continue;
+      addedEdgeKeys.add(key);
+
+      cytoscapeEdges.push({
+        data: { id: key, source: edge.source, target: edge.target, type: edge.type }
+      });
+    }
+
+    return { nodes: cytoscapeNodes, edges: cytoscapeEdges };
+  }
 }
