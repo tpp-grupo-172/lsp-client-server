@@ -651,7 +651,6 @@
 		if (exportState === 'generating') return;
 		exportState = 'generating';
 
-		// Yield to event loop so Svelte can update button to "Generating…" state
 		await new Promise((r) => setTimeout(r, 0));
 
 		const hiddenDiv = document.createElement('div');
@@ -659,46 +658,48 @@
 			'position:absolute;left:-9999px;top:-9999px;width:3000px;height:2000px;pointer-events:none;';
 		document.body.appendChild(hiddenDiv);
 
-		const { nodes, edges } = graphCache.getAllElements();
+		/** @type {cytoscape.Core | undefined} */
+		let tempCy;
+		try {
+			const { nodes, edges } = graphCache.getAllElements();
 
-		const tempCy = cytoscape(/** @type {any} */ ({
-			container: hiddenDiv,
-			elements: { nodes, edges },
-			style: buildStyle(),
-			userZoomingEnabled: false,
-			userPanningEnabled: false,
-			boxSelectionEnabled: false,
-			pixelRatio: window.devicePixelRatio ?? 1
-		}));
+			tempCy = cytoscape(/** @type {any} */ ({
+				container: hiddenDiv,
+				elements: { nodes, edges },
+				style: buildStyle(),
+				userZoomingEnabled: false,
+				userPanningEnabled: false,
+				boxSelectionEnabled: false
+			}));
 
-		tempCy.layout(/** @type {any} */ ({
-			name: 'cose-bilkent',
-			nodeDimensionsIncludeLabels: true,
-			edgeElasticity: 0.08,
-			nodeRepulsion: 4500,
-			idealEdgeLength: 120,
-			nestingFactor: 0.1,
-			gravity: 0.15,
-			numIter: 2500,
-			tile: true,
-			padding: 60,
-			randomize: false,
-			animate: false
-		})).run();
+			tempCy.layout(/** @type {any} */ ({
+				name: 'cose-bilkent',
+				nodeDimensionsIncludeLabels: true,
+				edgeElasticity: 0.08,
+				nodeRepulsion: 4500,
+				idealEdgeLength: 120,
+				nestingFactor: 0.1,
+				gravity: 0.15,
+				numIter: 2500,
+				tile: true,
+				padding: 60,
+				randomize: false,
+				animate: false
+			})).run();
 
-		const dataUrl = tempCy.png({ output: 'base64uri', full: true, scale: 2, bg: '#1e1e1e' });
+			const dataUrl = tempCy.png({ output: 'base64uri', full: true, scale: 2, bg: '#1e1e1e' });
 
-		tempCy.destroy();
-		document.body.removeChild(hiddenDiv);
-
-		const a = document.createElement('a');
-		a.href = dataUrl;
-		a.download = 'dependency-graph.png';
-		document.body.appendChild(a);
-		a.click();
-		document.body.removeChild(a);
-
-		exportState = 'idle';
+			const a = document.createElement('a');
+			a.href = dataUrl;
+			a.download = 'dependency-graph.png';
+			document.body.appendChild(a);
+			a.click();
+			document.body.removeChild(a);
+		} finally {
+			tempCy?.destroy();
+			document.body.removeChild(hiddenDiv);
+			exportState = 'idle';
+		}
 	}
 
 	/** @param {string | undefined} path */
