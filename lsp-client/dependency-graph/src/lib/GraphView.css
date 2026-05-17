@@ -54,6 +54,33 @@ body {
 	cursor: default;
 }
 
+.export-btn {
+	display: flex;
+	align-items: center;
+	background: none;
+	border: 1px solid #444;
+	color: #ccc;
+	padding: 4px 12px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 12px;
+	font-family: inherit;
+	white-space: nowrap;
+	transition:
+		background 0.15s,
+		color 0.15s;
+}
+
+.export-btn:hover:not(:disabled) {
+	background: #3c3c3c;
+	color: #fff;
+}
+
+.export-btn:disabled {
+	opacity: 0.3;
+	cursor: default;
+}
+
 /* ── Breadcrumb ── */
 .breadcrumb {
 	display: flex;

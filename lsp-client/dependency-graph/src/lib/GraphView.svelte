@@ -758,6 +758,15 @@
 				</div>
 			</div>
 		</nav>
+
+		<button
+			class="export-btn"
+			on:click={exportPng}
+			disabled={exportState === 'generating'}
+			title="Export full project graph as PNG"
+		>
+			{exportState === 'generating' ? 'Generating…' : 'Export PNG'}
+		</button>
 	</header>
 
 	<!-- ── Graph area ── -->
