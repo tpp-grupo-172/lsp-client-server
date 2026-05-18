@@ -577,6 +577,7 @@ impl Backend {
             function_calls: &Vec<Value>,
             local_variables: &Vec<Value>,
             parameters: &Vec<Value>,
+            self_attr_types: &HashMap<String, String>,
             path_string: &str,
             imports_hashmap: &HashMap<String, String>,
         | -> Vec<Connections> {
@@ -681,57 +682,77 @@ impl Backend {
                     }
                 } else if let Some(obj_name) = object_name {
                     // Caso 2: método sobre variable  →  obj.method()
-                    // Prioridad: local_variables (asignada desde función) → parameters (tipo anotado)
-                    let assigned_from = local_variables.iter()
-                        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name))
-                        .and_then(|v| v.get("assigned_from"))
-                        .and_then(|v| v.as_str());
+                    // Prioridad:
+                    //   2a. "self" / "this"          → mismo archivo (método de la clase actual)
+                    //   2b. "self.attr" / "this.attr" → tipo del atributo de instancia vía self_attr_types
+                    //   2c. local_variables           → variable asignada desde una llamada
+                    //   2d. parameters                → parámetro con tipo anotado
 
-                    if let Some(assigned_func) = assigned_from {
-                        let source_import = function_calls.iter()
-                            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
-                            .and_then(|c| c.get("import_name"))
+                    if obj_name == "self" || obj_name == "this" {
+                        // 2a: self.funcion_de_clase() — método definido en el mismo archivo
+                        new_connections.push(Connections {
+                            file_src: path_string.to_string(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
+                        });
+                    } else if let Some(attr_name) = obj_name.strip_prefix("self.")
+                        .or_else(|| obj_name.strip_prefix("this."))
+                    {
+                        // 2b: self.order_service.funcion1() — tipo resuelto desde __init__/constructor
+                        if let Some(type_name) = self_attr_types.get(attr_name) {
+                            if let Some(class_file) = find_class_file(type_name) {
+                                new_connections.push(Connections {
+                                    file_src: class_file, file_use: path_string.to_string(),
+                                    line, start_col, end_col, function: name.to_string(),
+                                });
+                            }
+                        }
+                    } else {
+                        // 2c: variable local asignada desde una función
+                        let assigned_from = local_variables.iter()
+                            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name))
+                            .and_then(|v| v.get("assigned_from"))
                             .and_then(|v| v.as_str());
 
-                        if let Some(module) = source_import {
-                            if let Some(return_type) = resolve_return_type(module, assigned_func) {
-                                if let Some(class_file) = find_class_file(&return_type) {
+                        if let Some(assigned_func) = assigned_from {
+                            let source_import = function_calls.iter()
+                                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
+                                .and_then(|c| c.get("import_name"))
+                                .and_then(|v| v.as_str());
+
+                            if let Some(module) = source_import {
+                                if let Some(return_type) = resolve_return_type(module, assigned_func) {
+                                    if let Some(class_file) = find_class_file(&return_type) {
+                                        new_connections.push(Connections {
+                                            file_src: class_file, file_use: path_string.to_string(),
+                                            line, start_col, end_col, function: name.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            // 2d: parámetro con tipo anotado
+                            let param_type = parameters.iter()
+                                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(obj_name))
+                                .and_then(|p| p.get("param_type"))
+                                .and_then(|v| v.as_str());
+
+                            if let Some(type_annotation) = param_type {
+                                let base_type = {
+                                    let t = type_annotation.trim().trim_matches('"').trim_matches('\'');
+                                    if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
+                                        inner.trim()
+                                    } else if let Some(base) = t.split('|').next() {
+                                        base.trim()
+                                    } else {
+                                        t
+                                    }
+                                };
+                                if let Some(class_file) = find_class_file(base_type) {
                                     new_connections.push(Connections {
                                         file_src: class_file, file_use: path_string.to_string(),
                                         line, start_col, end_col, function: name.to_string(),
                                     });
                                 }
-                            }
-                        }
-                    } else {
-                        // Fallback: obj_name podría ser un parámetro con tipo anotado
-                        // ej: def f(product: Product) → product.price()
-                        let param_type = parameters.iter()
-                            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(obj_name))
-                            .and_then(|p| p.get("param_type"))
-                            .and_then(|v| v.as_str());
-
-                        if let Some(type_annotation) = param_type {
-                            // Extraer el tipo base para anotaciones comunes:
-                            //   "Product"           → "Product"
-                            //   "Optional[Product]" → "Product"
-                            //   "Product | None"    → "Product"
-                            //   '"Product"'         → "Product"  (forward ref)
-                            let base_type = {
-                                let t = type_annotation.trim().trim_matches('"').trim_matches('\'');
-                                if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
-                                    inner.trim()
-                                } else if let Some(base) = t.split('|').next() {
-                                    base.trim()
-                                } else {
-                                    t
-                                }
-                            };
-                            if let Some(class_file) = find_class_file(base_type) {
-                                new_connections.push(Connections {
-                                    file_src: class_file, file_use: path_string.to_string(),
-                                    line, start_col, end_col, function: name.to_string(),
-                                });
                             }
                         }
                     }
@@ -775,6 +796,43 @@ impl Backend {
                 .and_then(|v| v.as_array())
                 .expect("methods no es un array");
 
+            // Construir mapa atributo_de_instancia → tipo a partir de __init__ / constructor.
+            // Para self.order_service = order_service donde order_service: OrderService
+            // queremos: self_attr_types["order_service"] = "OrderService"
+            let self_attr_types: HashMap<String, String> = {
+                let empty: Vec<Value> = vec![];
+                let init = methods.iter().find(|m| {
+                    matches!(m.get("name").and_then(|v| v.as_str()), Some("__init__") | Some("constructor"))
+                });
+                if let Some(init_method) = init {
+                    // param_name → param_type
+                    let param_types: HashMap<String, String> = init_method
+                        .get("parameters").and_then(|v| v.as_array()).unwrap_or(&empty)
+                        .iter()
+                        .filter_map(|p| Some((
+                            p.get("name").and_then(|v| v.as_str())?.to_string(),
+                            p.get("param_type").and_then(|v| v.as_str())?.to_string(),
+                        )))
+                        .collect();
+
+                    // self.attr = param_name → buscar tipo de param_name
+                    init_method
+                        .get("local_variables").and_then(|v| v.as_array()).unwrap_or(&empty)
+                        .iter()
+                        .filter_map(|lv| {
+                            let lv_name = lv.get("name").and_then(|v| v.as_str())?;
+                            let attr = lv_name.strip_prefix("self.")
+                                .or_else(|| lv_name.strip_prefix("this."))?;
+                            let assigned_id = lv.get("assigned_identifier").and_then(|v| v.as_str())?;
+                            let param_type = param_types.get(assigned_id)?;
+                            Some((attr.to_string(), param_type.clone()))
+                        })
+                        .collect()
+                } else {
+                    HashMap::new()
+                }
+            };
+
             for method in methods {
                 let function_calls = method
                     .get("function_calls")
@@ -795,6 +853,7 @@ impl Backend {
                     function_calls,
                     &local_variables,
                     &method_parameters,
+                    &self_attr_types,
                     &path_string,
                     &imports_hashmap,
                 );
@@ -830,6 +889,7 @@ impl Backend {
                 function_calls,
                 &local_variables,
                 &func_parameters,
+                &HashMap::new(), // funciones top-level no tienen self/this
                 &path_string,
                 &imports_hashmap,
             );
