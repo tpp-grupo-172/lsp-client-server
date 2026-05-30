@@ -119,6 +119,7 @@ struct FunctionData {
     parameters: Vec<Value>,
     return_type: Option<Value>,
     function_calls: Vec<Value>, // Value = { "name": String, "import_name": Option<String>}
+    line: Option<i64>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct LspFileMessage {
@@ -135,12 +136,14 @@ struct Connections {
     start_col: usize,
     end_col: usize,
     function: String,
+    class_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct FunctionsInFiles {
     file_src: String,
     function: String,
+    class_name: Option<String>,
     line: i64,
     name_start_col: usize,
     name_end_col: usize,
@@ -192,6 +195,8 @@ struct RenameRequest {
     file_path: String,
     old_name: String,
     new_name: String,
+    line: Option<i64>,
+    class_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -715,6 +720,7 @@ impl Backend {
             jedi_types: &HashMap<String, String>,
             path_string: &str,
             imports_hashmap: &HashMap<String, String>,
+            caller_class: Option<&str>,
         | -> Vec<Connections> {
             let mut new_connections = vec![];
 
@@ -813,6 +819,7 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: path.clone(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: None,
                         });
                     }
                 } else if let Some(obj_name) = object_name {
@@ -839,6 +846,7 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: path_string.to_string(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: caller_class.map(|s| s.to_string()),
                         });
                     } else if let Some(attr_name) = obj_name.strip_prefix("self.")
                         .or_else(|| obj_name.strip_prefix("this."))
@@ -849,6 +857,7 @@ impl Backend {
                                 new_connections.push(Connections {
                                     file_src: class_file, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
+                                    class_name: Some(type_name.clone()),
                                 });
                             }
                         }
@@ -859,6 +868,7 @@ impl Backend {
                                 new_connections.push(Connections {
                                     file_src: module_path, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
+                                    class_name: None,
                                 });
                             }
                         }
@@ -895,6 +905,7 @@ impl Backend {
                                             new_connections.push(Connections {
                                                 file_src: class_file, file_use: path_string.to_string(),
                                                 line, start_col, end_col, function: name.to_string(),
+                                                class_name: Some(elem_type.to_string()),
                                             });
                                         }
                                     }
@@ -927,6 +938,7 @@ impl Backend {
                                         new_connections.push(Connections {
                                             file_src: class_file, file_use: path_string.to_string(),
                                             line, start_col, end_col, function: name.to_string(),
+                                            class_name: Some(resolved_type.clone()),
                                         });
                                     }
                                 }
@@ -947,6 +959,7 @@ impl Backend {
                                             new_connections.push(Connections {
                                                 file_src: class_file, file_use: path_string.to_string(),
                                                 line, start_col, end_col, function: name.to_string(),
+                                                class_name: Some(prop_type.clone()),
                                             });
                                         }
                                     }
@@ -964,40 +977,42 @@ impl Backend {
                                     "shift", "pop", "find", "findLast", "at", "get", "first", "last",
                                 ];
 
-                                let via_self_attr: Option<String> = function_calls.iter()
+                                let via_self_attr: Option<(String, String)> = function_calls.iter()
                                     .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
                                     .and_then(|c| {
                                         let obj = c.get("object_name").and_then(|v| v.as_str())?;
                                         let attr = obj.strip_prefix("self.").or_else(|| obj.strip_prefix("this."))?;
-                                        let class_name = self_attr_types.get(attr)?;
+                                        let attr_type = self_attr_types.get(attr)?;
 
                                         // Si es un método que devuelve elemento de colección
                                         // (shift, pop, find…), extraer el tipo elemento directamente.
                                         if ARRAY_ELEMENT_METHODS.contains(&assigned_func) {
-                                            if let Some(elem_type) = extract_element_type(class_name) {
-                                                return find_class_file(&elem_type);
+                                            if let Some(elem_type) = extract_element_type(attr_type) {
+                                                let f = find_class_file(&elem_type)?;
+                                                return Some((elem_type, f));
                                             }
                                         }
 
-                                        let class_file = find_class_file(class_name)?;
-                                        let return_type = find_method_return_type(&class_file, class_name, assigned_func)?;
+                                        let class_file = find_class_file(attr_type)?;
+                                        let return_type = find_method_return_type(&class_file, attr_type, assigned_func)?;
                                         // Unwrap Optional[T] / T | None → T
                                         let base = {
                                             let t = return_type.trim();
                                             if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
                                                 inner.trim().to_string()
-                                            } else if let Some(base) = t.split('|').next() {
-                                                base.trim().to_string()
+                                            } else if let Some(b) = t.split('|').next() {
+                                                b.trim().to_string()
                                             } else {
                                                 t.to_string()
                                             }
                                         };
-                                        find_class_file(&base)
+                                        find_class_file(&base).map(|f| (base, f))
                                     });
-                                if let Some(class_file) = via_self_attr {
+                                if let Some((callee_class, class_file)) = via_self_attr {
                                     new_connections.push(Connections {
                                         file_src: class_file, file_use: path_string.to_string(),
                                         line, start_col, end_col, function: name.to_string(),
+                                        class_name: Some(callee_class),
                                     });
                                 }
                             }
@@ -1023,6 +1038,7 @@ impl Backend {
                                     new_connections.push(Connections {
                                         file_src: class_file, file_use: path_string.to_string(),
                                         line, start_col, end_col, function: name.to_string(),
+                                        class_name: Some(base_type.to_string()),
                                     });
                                 }
                             }
@@ -1035,6 +1051,7 @@ impl Backend {
                                 new_connections.push(Connections {
                                     file_src: module_path, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
+                                    class_name: None,
                                 });
                             }
                         }
@@ -1045,6 +1062,7 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: src_file.clone(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: call_contexts.get(source_fn).map(|(t, _)| t.clone()),
                         });
                     }
                 } else {
@@ -1059,6 +1077,7 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: path_string.to_string(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: None,
                         });
                     }
                 }
@@ -1074,6 +1093,7 @@ impl Backend {
             .expect("classes no es un array");
 
         for class in classes {
+            let current_class_name = class.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let methods = class
                 .get("methods")
                 .and_then(|v| v.as_array())
@@ -1152,6 +1172,7 @@ impl Backend {
                     &jedi_types,
                     &path_string,
                     &imports_hashmap,
+                    Some(current_class_name.as_str()),
                 );
 
                 let mut guard = self.connections.write().await;
@@ -1189,6 +1210,7 @@ impl Backend {
                 &jedi_types,
                 &path_string,
                 &imports_hashmap,
+                None,
             );
 
             let mut guard = self.connections.write().await;
@@ -1211,6 +1233,7 @@ impl Backend {
             .expect("classes no es un array");
 
         for calss in calsses {
+            let class_name_str = calss.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
             let methods = calss
                 .get("methods")
                 .and_then(|v| v.as_array())
@@ -1225,6 +1248,7 @@ impl Backend {
                     let functions_in_file = FunctionsInFiles {
                         file_src: path_string.clone(),
                         function: function_name.to_string(),
+                        class_name: class_name_str.clone(),
                         line,
                         name_start_col,
                         name_end_col,
@@ -1250,6 +1274,7 @@ impl Backend {
                 let functions_in_file = FunctionsInFiles {
                     file_src: path_string.clone(),
                     function: function_name.to_string(),
+                    class_name: None,
                     line,
                     name_start_col,
                     name_end_col,
@@ -1321,11 +1346,16 @@ impl Backend {
             .to_string_lossy()
             .to_string();
 
-        // 1. Buscar la definición
+        // 1. Buscar la definición — disambiguar por line y class_name cuando están disponibles
         let definition = {
             let guard = self.functions_in_file.read().await;
             guard.iter()
-                .find(|f| f.function == *old_name && f.file_src == abs_file_path)
+                .find(|f| {
+                    f.function == *old_name
+                    && f.file_src == abs_file_path
+                    && (params.line.is_none() || params.line == Some(f.line))
+                    && (params.class_name.is_none() || params.class_name == f.class_name)
+                })
                 .cloned()
         };
 
@@ -1338,10 +1368,15 @@ impl Backend {
         };
 
         // 2. Recopilar todos los call sites que apuntan a esta definición
+        //    Filtramos también por class_name para no mezclar métodos homónimos de clases distintas
         let call_sites: Vec<Connections> = {
             let guard = self.connections.read().await;
             guard.iter()
-                .filter(|c| c.function == *old_name && c.file_src == def.file_src)
+                .filter(|c| {
+                    c.function == *old_name
+                    && c.file_src == def.file_src
+                    && c.class_name == def.class_name
+                })
                 .cloned()
                 .collect()
         };
