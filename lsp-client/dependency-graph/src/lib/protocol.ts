@@ -37,6 +37,7 @@ export interface ImportData {
 export interface ClassData {
   name: string;
   methods: FunctionData[];
+  line?: number | null;
 }
 
 export interface FunctionData {
@@ -44,7 +45,8 @@ export interface FunctionData {
   returnType?: string | null;
   return_type?: string | null;
   function_calls: FunctionCallData[];
-  parameters: ParametersData[]
+  parameters: ParametersData[];
+  line?: number | null;
 }
 
 export interface ParametersData {
@@ -89,6 +91,10 @@ export interface InternalNode {
   /** Ruta del archivo al que pertenece (presente en function/method/class, ausente en folder) */
   path?: string;
   returnType?: string | null;
+  /** Número de línea donde está definido (función, método o clase) */
+  line?: number | null;
+  /** Nombre de la clase a la que pertenece (solo para métodos) */
+  className?: string | null;
 }
 
 export interface InternalEdge {
@@ -118,6 +124,8 @@ export interface RenameRequest {
   filePath: string;
   oldName: string;
   newName: string;
+  line?: number | null;
+  className?: string | null;
 }
 
 export interface RenameResult {

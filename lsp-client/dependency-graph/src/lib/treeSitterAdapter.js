@@ -123,13 +123,14 @@ export function buildGraphFromTreeSitter(data) {
                 type: 'function',
                 path: file.file_name,
                 returnType: fn.return_type ?? fn.returnType ?? null,
+                line: fn.line ?? null,
             });
             link(file.file_name, id, 'declares');
         }
 
         for (const cls of file.classes ?? []) {
             const clsId = mkClsId(file.file_name, cls.name);
-            addNode({ id: clsId, label: cls.name, type: 'class', path: file.file_name });
+            addNode({ id: clsId, label: cls.name, type: 'class', path: file.file_name, line: cls.line ?? null });
             link(file.file_name, clsId, 'declares');
 
             for (const method of cls.methods ?? []) {
@@ -140,6 +141,8 @@ export function buildGraphFromTreeSitter(data) {
                     type: 'method',
                     path: file.file_name,
                     returnType: method.return_type ?? method.returnType ?? null,
+                    line: method.line ?? null,
+                    className: cls.name,
                 });
                 link(clsId, mthId, 'declares');
             }
