@@ -681,10 +681,11 @@ impl Backend {
         // Helper closure: dado un type_name, encuentra el path del archivo que define esa clase
         let find_class_file = |type_name: &str| -> Option<String> {
             for (path, file_value) in &store_snapshot {
-                let classes = file_value.get("classes")?.as_array()?;
+                let Some(classes) = file_value.get("classes").and_then(|v| v.as_array()) else { continue; };
                 for class in classes {
-                    if class.get("name")?.as_str()? == type_name {
-                        return Some(path.to_str()?.to_string());
+                    let Some(name) = class.get("name").and_then(|v| v.as_str()) else { continue; };
+                    if name == type_name {
+                        return path.to_str().map(|s| s.to_string());
                     }
                 }
             }
@@ -945,11 +946,12 @@ impl Backend {
                             } else if destructured_property.is_some() {
                                 // 2c-path-1b: función local (mismo archivo) con destructuring
                                 // const { userAPI } = buildApp()  →  buscar buildApp en binding
-                                let local_return_type = binding.get("functions")
+                                let source_fn_node = binding.get("functions")
                                     .and_then(|v| v.as_array())
                                     .and_then(|funcs| funcs.iter().find(|f| {
                                         f.get("name").and_then(|n| n.as_str()) == Some(assigned_func)
-                                    }))
+                                    }));
+                                let local_return_type = source_fn_node
                                     .and_then(|f| f.get("return_type"))
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string());
@@ -960,6 +962,31 @@ impl Backend {
                                                 file_src: class_file, file_use: path_string.to_string(),
                                                 line, start_col, end_col, function: name.to_string(),
                                                 class_name: Some(prop_type.clone()),
+                                            });
+                                        }
+                                    }
+                                } else if new_connections.len() == connections_before {
+                                    // 2c-path-1b-fallback: buildApp sin return type anotado
+                                    // Buscar la variable local de buildApp cuyo nombre coincide con
+                                    // la propiedad destructurada (ej: "userAPI") y ver desde qué
+                                    // clase fue instanciada con `new`.
+                                    // const userAPI = new UserAPI(...)  →  type = "UserAPI"
+                                    let prop = destructured_property.unwrap();
+                                    let inferred_type = source_fn_node
+                                        .and_then(|f| f.get("local_variables"))
+                                        .and_then(|v| v.as_array())
+                                        .and_then(|vars| vars.iter().find(|v| {
+                                            v.get("name").and_then(|n| n.as_str()) == Some(prop)
+                                        }))
+                                        .and_then(|v| v.get("assigned_from"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    if let Some(type_name) = inferred_type {
+                                        if let Some(class_file) = find_class_file(&type_name) {
+                                            new_connections.push(Connections {
+                                                file_src: class_file, file_use: path_string.to_string(),
+                                                line, start_col, end_col, function: name.to_string(),
+                                                class_name: Some(type_name.clone()),
                                             });
                                         }
                                     }
