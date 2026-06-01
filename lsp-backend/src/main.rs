@@ -491,6 +491,13 @@ impl Backend {
             )
             .await;
 
+        // Pasada 1: poblar el store completo antes de computar conexiones.
+        // Cada archivo se carga desde caché o se analiza desde cero, pero
+        // save_function_reference no se llama todavía — así cuando llegue la
+        // pasada 2 el store ya tiene todos los archivos y find_class_file puede
+        // resolver cualquier referencia cruzada.
+        let mut analyzed: Vec<(PathBuf, Value, HashMap<String, String>)> = Vec::new();
+
         for path in &py_files {
             let file_bytes = match fs::read(path).await {
                 Ok(b) => b,
@@ -509,8 +516,7 @@ impl Backend {
             // Intentar warm-up desde caché
             if let Some(cached_value) = self.try_load_from_cache(path, &content_hash).await {
                 self.upsert_store_value(path, &cached_value).await;
-                self.save_function_reference(path, &cached_value, jedi_types).await;
-                self.save_functions(path, &cached_value).await;
+                analyzed.push((path.clone(), cached_value, jedi_types));
                 continue;
             }
 
@@ -523,10 +529,15 @@ impl Backend {
                 let value: Value = serde_json::from_str(&json_str)
                     .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
                 self.upsert_store_value(path, &value).await;
-                self.save_function_reference(path, &value, jedi_types).await;
-                self.save_functions(path, &value).await;
                 let _ = self.persist_analysis_json(path, &value, &content_hash).await;
+                analyzed.push((path.clone(), value, jedi_types));
             }
+        }
+
+        // Pasada 2: con el store completo, computar todas las conexiones.
+        for (path, value, jedi_types) in analyzed {
+            self.save_function_reference(&path, &value, jedi_types).await;
+            self.save_functions(&path, &value).await;
         }
 
         if !py_files.is_empty() {
@@ -680,11 +691,25 @@ impl Backend {
 
         // Helper closure: dado un type_name, encuentra el path del archivo que define esa clase
         let find_class_file = |type_name: &str| -> Option<String> {
+            // Normalizar: stripear notación de array (OrderItem[] → OrderItem)
+            let t = type_name.trim();
+            let t = t.strip_suffix("[]").unwrap_or(t).trim();
+            // Tipos primitivos/built-in nunca son clases de usuario
+            const BUILTINS: &[&str] = &[
+                "string", "number", "boolean", "void", "any", "unknown", "never",
+                "null", "undefined", "object", "symbol", "bigint",
+                "str", "int", "float", "bool", "bytes", "NoneType",
+                "Function", "Array", "Promise", "Error", "Object",
+                "Date", "RegExp", "Map", "Set", "WeakMap", "WeakSet",
+            ];
+            if BUILTINS.contains(&t) || t.is_empty() { return None; }
+            if t.len() == 1 { return None; } // parámetros genéricos T, K, V, etc.
+
             for (path, file_value) in &store_snapshot {
                 let Some(classes) = file_value.get("classes").and_then(|v| v.as_array()) else { continue; };
                 for class in classes {
                     let Some(name) = class.get("name").and_then(|v| v.as_str()) else { continue; };
-                    if name == type_name {
+                    if name == t {
                         return path.to_str().map(|s| s.to_string());
                     }
                 }
@@ -1674,6 +1699,8 @@ impl LanguageServer for Backend {
                                 .publish_diagnostics(uri, diagnostics, None)
                                 .await;
                         }
+                    } else {
+                      self.client.publish_diagnostics(uri, vec![], None).await;
                     }
                 }
 
