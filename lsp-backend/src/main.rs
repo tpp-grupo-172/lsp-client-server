@@ -137,6 +137,8 @@ struct Connections {
     end_col: usize,
     function: String,
     class_name: Option<String>,
+    source_function: String,
+    source_class_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -170,9 +172,20 @@ struct CustomData {
 struct ProcessedJson;
 struct ShowFilesToChange;
 
+#[derive(Serialize, Debug, Deserialize, Clone)]
+struct ConnectionMessage {
+    source_file: String,
+    source_function: String,
+    source_class_name: Option<String>,
+    target_file: String,
+    target_function: String,
+    target_class_name: Option<String>,
+}
+
 #[derive(Serialize, Debug, Deserialize)]
 struct ProcessedJsonPayload {
     files: Vec<LspFileMessage>,
+    connections: Vec<ConnectionMessage>,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -440,6 +453,21 @@ fn format_for_lsp_message(
         .collect()
 }
 
+fn format_connections_for_lsp(connections: &[Connections], root: &Path) -> Vec<ConnectionMessage> {
+    fn rel(abs: &str, root: &Path) -> String {
+        let p = Path::new(abs);
+        p.strip_prefix(root).unwrap_or(p).to_string_lossy().into_owned()
+    }
+    connections.iter().map(|c| ConnectionMessage {
+        source_file: rel(&c.file_use, root),
+        source_function: c.source_function.clone(),
+        source_class_name: c.source_class_name.clone(),
+        target_file: rel(&c.file_src, root),
+        target_function: c.function.clone(),
+        target_class_name: c.class_name.clone(),
+    }).collect()
+}
+
 impl Backend {
     /// Recarga la lista de carpetas ignoradas leyendo `.lspignore` desde el workspace actual.
     async fn reload_ignore_list(&self) {
@@ -543,8 +571,10 @@ impl Backend {
         if !py_files.is_empty() {
             let map = self.store.read().await;
             let message = format_for_lsp_message(map, root.clone());
+            let connections_guard = self.connections.read().await;
+            let connections_msg = format_connections_for_lsp(&connections_guard, &root);
             self.client
-                .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message, connections: connections_msg })
                 .await;
         }
     }
@@ -612,8 +642,10 @@ impl Backend {
                     // Notifica al cliente con el agregado de este archivo
                     let map = self.store.read().await;
                     let message = format_for_lsp_message(map, root.clone());
+                    let connections_guard = self.connections.read().await;
+                    let connections_msg = format_connections_for_lsp(&connections_guard, &root);
                     self.client
-                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message, connections: connections_msg })
                         .await;
 
                     // Persiste a disco (ignora error no fatal)
@@ -747,6 +779,7 @@ impl Backend {
             path_string: &str,
             imports_hashmap: &HashMap<String, String>,
             caller_class: Option<&str>,
+            caller_function: &str,
         | -> Vec<Connections> {
             let mut new_connections = vec![];
 
@@ -846,6 +879,8 @@ impl Backend {
                             file_src: path.clone(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
                             class_name: None,
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     }
                 } else if let Some(obj_name) = object_name {
@@ -873,6 +908,8 @@ impl Backend {
                             file_src: path_string.to_string(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
                             class_name: caller_class.map(|s| s.to_string()),
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     } else if let Some(attr_name) = obj_name.strip_prefix("self.")
                         .or_else(|| obj_name.strip_prefix("this."))
@@ -884,6 +921,8 @@ impl Backend {
                                     file_src: class_file, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
                                     class_name: Some(type_name.clone()),
+                                    source_function: caller_function.to_string(),
+                                    source_class_name: caller_class.map(|s| s.to_string()),
                                 });
                             }
                         }
@@ -895,6 +934,8 @@ impl Backend {
                                     file_src: module_path, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
                                     class_name: None,
+                                    source_function: caller_function.to_string(),
+                                    source_class_name: caller_class.map(|s| s.to_string()),
                                 });
                             }
                         }
@@ -932,6 +973,8 @@ impl Backend {
                                                 file_src: class_file, file_use: path_string.to_string(),
                                                 line, start_col, end_col, function: name.to_string(),
                                                 class_name: Some(elem_type.to_string()),
+                                                source_function: caller_function.to_string(),
+                                                source_class_name: caller_class.map(|s| s.to_string()),
                                             });
                                         }
                                     }
@@ -965,6 +1008,8 @@ impl Backend {
                                             file_src: class_file, file_use: path_string.to_string(),
                                             line, start_col, end_col, function: name.to_string(),
                                             class_name: Some(resolved_type.clone()),
+                                            source_function: caller_function.to_string(),
+                                            source_class_name: caller_class.map(|s| s.to_string()),
                                         });
                                     }
                                 }
@@ -987,6 +1032,8 @@ impl Backend {
                                                 file_src: class_file, file_use: path_string.to_string(),
                                                 line, start_col, end_col, function: name.to_string(),
                                                 class_name: Some(prop_type.clone()),
+                                                source_function: caller_function.to_string(),
+                                                source_class_name: caller_class.map(|s| s.to_string()),
                                             });
                                         }
                                     }
@@ -1012,6 +1059,8 @@ impl Backend {
                                                 file_src: class_file, file_use: path_string.to_string(),
                                                 line, start_col, end_col, function: name.to_string(),
                                                 class_name: Some(type_name.clone()),
+                                                source_function: caller_function.to_string(),
+                                                source_class_name: caller_class.map(|s| s.to_string()),
                                             });
                                         }
                                     }
@@ -1065,6 +1114,8 @@ impl Backend {
                                         file_src: class_file, file_use: path_string.to_string(),
                                         line, start_col, end_col, function: name.to_string(),
                                         class_name: Some(callee_class),
+                                        source_function: caller_function.to_string(),
+                                        source_class_name: caller_class.map(|s| s.to_string()),
                                     });
                                 }
                             }
@@ -1091,6 +1142,8 @@ impl Backend {
                                         file_src: class_file, file_use: path_string.to_string(),
                                         line, start_col, end_col, function: name.to_string(),
                                         class_name: Some(base_type.to_string()),
+                                        source_function: caller_function.to_string(),
+                                        source_class_name: caller_class.map(|s| s.to_string()),
                                     });
                                 }
                             }
@@ -1104,6 +1157,8 @@ impl Backend {
                                     file_src: module_path, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
                                     class_name: None,
+                                    source_function: caller_function.to_string(),
+                                    source_class_name: caller_class.map(|s| s.to_string()),
                                 });
                             }
                         }
@@ -1115,6 +1170,8 @@ impl Backend {
                             file_src: src_file.clone(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
                             class_name: call_contexts.get(source_fn).map(|(t, _)| t.clone()),
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     }
                 } else {
@@ -1130,6 +1187,8 @@ impl Backend {
                             file_src: path_string.to_string(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
                             class_name: None,
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     }
                 }
@@ -1215,6 +1274,10 @@ impl Backend {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                let method_name = method
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 let new_connections = process_function_calls(
                     function_calls,
@@ -1225,6 +1288,7 @@ impl Backend {
                     &path_string,
                     &imports_hashmap,
                     Some(current_class_name.as_str()),
+                    method_name,
                 );
 
                 let mut guard = self.connections.write().await;
@@ -1253,6 +1317,10 @@ impl Backend {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let func_name = func
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             let new_connections = process_function_calls(
                 function_calls,
@@ -1263,6 +1331,7 @@ impl Backend {
                 &path_string,
                 &imports_hashmap,
                 None,
+                func_name,
             );
 
             let mut guard = self.connections.write().await;
@@ -1631,9 +1700,10 @@ impl LanguageServer for Backend {
                     let unused_functions: Vec<FunctionsInFiles> =
                         utils::find_unused_functions(&functions_in_file_lock, &current_connections);
                     let message = format_for_lsp_message(map, root.clone());
+                    let connections_msg = format_connections_for_lsp(&current_connections, &root);
 
                     self.client
-                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message, connections: connections_msg })
                         .await;
                     if files_to_warn.len() > 0 {
                         for (_, files) in files_to_warn {

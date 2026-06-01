@@ -54,7 +54,8 @@ export function activate(context: vscode.ExtensionContext) {
       if (activePanel) {
         activePanel.webview.postMessage({
           command: 'lsp-server/processedJson',
-          files: files
+          files: files,
+          connections: data.connections ?? [],
         });
       }
     });

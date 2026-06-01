@@ -27,7 +27,7 @@ if (typeof window !== 'undefined') {
     switch (message.command) {
       case 'lsp-server/processedJson':
         if (!Array.isArray(message.files)) return;
-        lspData.set({ files: message.files });
+        lspData.set({ files: message.files, connections: message.connections ?? [] });
         break;
     }
   });

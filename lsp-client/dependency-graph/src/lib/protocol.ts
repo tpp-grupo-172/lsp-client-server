@@ -14,8 +14,18 @@
    en el payload, sin interpretaciones ni transformaciones.
 ═══════════════════════════════════════════════════════════════════════════ */
 
+export interface ResolvedConnectionData {
+  source_file: string;
+  source_function: string;
+  source_class_name?: string | null;
+  target_file: string;
+  target_function: string;
+  target_class_name?: string | null;
+}
+
 export interface TreeSitterData {
   files: FileData[];
+  connections?: ResolvedConnectionData[];
 }
 
 export interface FileData {
