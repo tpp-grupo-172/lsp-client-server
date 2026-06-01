@@ -54,7 +54,10 @@ function activate(context) {
         documentSelector: [
             { scheme: "file", language: "plaintext" },
             { scheme: "file", language: "python" },
-            { scheme: "file", language: "javascript" }
+            { scheme: "file", language: "javascript" },
+            { scheme: "file", language: "typescript" },
+            { scheme: "file", language: "typescriptreact" },
+            { scheme: "file", language: "javascriptreact" },
         ],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
@@ -69,7 +72,8 @@ function activate(context) {
             if (activePanel) {
                 activePanel.webview.postMessage({
                     command: 'lsp-server/processedJson',
-                    files: files
+                    files: files,
+                    connections: data.connections ?? [],
                 });
             }
         });
@@ -97,6 +101,7 @@ function activate(context) {
     const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
         const panel = vscode.window.createWebviewPanel("dependencyGraph", "Dependency Graph", vscode.ViewColumn.One, {
             enableScripts: true,
+            retainContextWhenHidden: true,
             localResourceRoots: [
                 context.extensionUri
             ]
@@ -129,7 +134,9 @@ function activate(context) {
                     const result = await client.sendRequest('lsp-server/renameFunction', {
                         file_path: message.filePath,
                         old_name: message.oldName,
-                        new_name: message.newName
+                        new_name: message.newName,
+                        line: message.line ?? null,
+                        class_name: message.className ?? null,
                     });
                     panel.webview.postMessage({
                         command: 'rename-function-result',

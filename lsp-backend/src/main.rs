@@ -23,12 +23,103 @@ use crate::utils::FileWarn;
 
 mod utils;
 
+// Script Python embebido en el binario en tiempo de compilación.
+// Se escribe a un archivo temporal en la primera ejecución.
+const JEDI_SCRIPT: &str = include_str!("../jedi_analyzer.py");
+const TS_ANALYZER_SCRIPT: &str = include_str!("../ts_analyzer.js");
+
+/// Escribe el script de jedi a un archivo temporal y devuelve su path.
+fn jedi_script_path() -> PathBuf {
+    let path = std::env::temp_dir().join("lsp_jedi_analyzer.py");
+    // Sobreescribir siempre garantiza que esté actualizado tras recompilaciones
+    let _ = std::fs::write(&path, JEDI_SCRIPT);
+    path
+}
+
+/// Llama al script jedi_analyzer.py para el archivo dado.
+/// Devuelve un mapa "varname@line" → module_path donde está definida esa clase.
+/// Si jedi no está instalado o falla, devuelve un mapa vacío (fallback silencioso).
+async fn run_jedi_analysis(file_path: &Path) -> HashMap<String, String> {
+    // Solo tiene sentido para archivos Python
+    if file_path.extension().and_then(|e| e.to_str()) != Some("py") {
+        return HashMap::new();
+    }
+
+    let script = jedi_script_path();
+    let file = file_path.to_path_buf();
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("python3")
+            .arg(&script)
+            .arg(&file)
+            .output()
+    })
+    .await;
+
+    match output {
+        Ok(Ok(out)) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(&stdout)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(key, val)| {
+                    let module_path = val.get("module_path")?.as_str()?.to_string();
+                    Some((key, module_path))
+                })
+                .collect()
+        }
+        _ => HashMap::new(),
+    }
+}
+
+fn ts_analyzer_script_path() -> PathBuf {
+    let path = std::env::temp_dir().join("lsp_ts_analyzer.js");
+    let _ = std::fs::write(&path, TS_ANALYZER_SCRIPT);
+    path
+}
+
+/// Fallback de inferencia de tipos para archivos JS/TS usando la TypeScript Compiler API.
+/// Devuelve un mapa "varname@line" → module_path igual que run_jedi_analysis.
+/// Si node o typescript no están disponibles, devuelve un mapa vacío.
+async fn run_ts_analysis(file_path: &Path) -> HashMap<String, String> {
+    if !matches!(file_path.extension().and_then(|e| e.to_str()), Some("ts" | "tsx" | "js" | "jsx")) {
+        return HashMap::new();
+    }
+
+    let script = ts_analyzer_script_path();
+    let file = file_path.to_path_buf();
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("node")
+            .arg(&script)
+            .arg(&file)
+            .output()
+    })
+    .await;
+
+    match output {
+        Ok(Ok(out)) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            serde_json::from_str::<HashMap<String, serde_json::Value>>(&stdout)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(key, val)| {
+                    let module_path = val.get("module_path")?.as_str()?.to_string();
+                    Some((key, module_path))
+                })
+                .collect()
+        }
+        _ => HashMap::new(),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct FunctionData {
     name: String,
     parameters: Vec<Value>,
     return_type: Option<Value>,
     function_calls: Vec<Value>, // Value = { "name": String, "import_name": Option<String>}
+    line: Option<i64>,
 }
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct LspFileMessage {
@@ -45,12 +136,16 @@ struct Connections {
     start_col: usize,
     end_col: usize,
     function: String,
+    class_name: Option<String>,
+    source_function: String,
+    source_class_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct FunctionsInFiles {
     file_src: String,
     function: String,
+    class_name: Option<String>,
     line: i64,
     name_start_col: usize,
     name_end_col: usize,
@@ -77,9 +172,20 @@ struct CustomData {
 struct ProcessedJson;
 struct ShowFilesToChange;
 
+#[derive(Serialize, Debug, Deserialize, Clone)]
+struct ConnectionMessage {
+    source_file: String,
+    source_function: String,
+    source_class_name: Option<String>,
+    target_file: String,
+    target_function: String,
+    target_class_name: Option<String>,
+}
+
 #[derive(Serialize, Debug, Deserialize)]
 struct ProcessedJsonPayload {
     files: Vec<LspFileMessage>,
+    connections: Vec<ConnectionMessage>,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -102,6 +208,8 @@ struct RenameRequest {
     file_path: String,
     old_name: String,
     new_name: String,
+    line: Option<i64>,
+    class_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -145,6 +253,36 @@ async fn ensure_dirs(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Retorna el hash Blake3 (hex) del path serializado como string.
+/// Extrae el tipo elemento de un tipo colección: `EmailJob[]` → `"EmailJob"`, `List[T]` → `"T"`.
+fn extract_element_type(t: &str) -> Option<String> {
+    let t = t.trim();
+    if let Some(inner) = t.strip_suffix("[]") {
+        return Some(inner.trim().to_string());
+    }
+    if let Some(inner) = t.strip_prefix("Array<").and_then(|s| s.strip_suffix('>'))
+        .or_else(|| t.strip_prefix("ReadonlyArray<").and_then(|s| s.strip_suffix('>'))) {
+        return Some(inner.trim().to_string());
+    }
+    if let Some(inner) = t.strip_prefix("List[").and_then(|s| s.strip_suffix(']')) {
+        return Some(inner.trim().to_string());
+    }
+    if let Some(inner) = t.strip_prefix("Set[").and_then(|s| s.strip_suffix(']')) {
+        return Some(inner.trim().to_string());
+    }
+    None
+}
+
+/// Dado el string de un return type de TypeScript (ej: `"{ userAPI: UserAPI, productAPI: ProductAPI }"`)
+/// y el nombre de una propiedad destructurada, extrae el tipo de esa propiedad.
+fn extract_type_for_property(return_type: &str, property: &str) -> Option<String> {
+    let needle = format!("{}:", property);
+    let start = return_type.find(&needle)? + needle.len();
+    let rest = return_type[start..].trim_start();
+    let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '.').unwrap_or(rest.len());
+    let type_name = rest[..end].trim();
+    if type_name.is_empty() { None } else { Some(type_name.to_string()) }
+}
+
 fn hash_path(path: &Path) -> String {
     // to_string_lossy para tolerar paths con Unicode/OS raros.
     let s: Cow<str> = path.to_string_lossy();
@@ -315,6 +453,21 @@ fn format_for_lsp_message(
         .collect()
 }
 
+fn format_connections_for_lsp(connections: &[Connections], root: &Path) -> Vec<ConnectionMessage> {
+    fn rel(abs: &str, root: &Path) -> String {
+        let p = Path::new(abs);
+        p.strip_prefix(root).unwrap_or(p).to_string_lossy().into_owned()
+    }
+    connections.iter().map(|c| ConnectionMessage {
+        source_file: rel(&c.file_use, root),
+        source_function: c.source_function.clone(),
+        source_class_name: c.source_class_name.clone(),
+        target_file: rel(&c.file_src, root),
+        target_function: c.function.clone(),
+        target_class_name: c.class_name.clone(),
+    }).collect()
+}
+
 impl Backend {
     /// Recarga la lista de carpetas ignoradas leyendo `.lspignore` desde el workspace actual.
     async fn reload_ignore_list(&self) {
@@ -352,7 +505,7 @@ impl Backend {
                 if ft.is_dir() {
                     dirs.push(path);
                 } else if ft.is_file()
-                    && (path.extension().and_then(|e| e.to_str()) == Some("py") || path.extension().and_then(|e| e.to_str()) == Some("js")) 
+                    && matches!(path.extension().and_then(|e| e.to_str()), Some("py" | "js" | "ts" | "tsx" | "jsx"))
                 {
                     py_files.push(path);
                 }
@@ -366,6 +519,13 @@ impl Backend {
             )
             .await;
 
+        // Pasada 1: poblar el store completo antes de computar conexiones.
+        // Cada archivo se carga desde caché o se analiza desde cero, pero
+        // save_function_reference no se llama todavía — así cuando llegue la
+        // pasada 2 el store ya tiene todos los archivos y find_class_file puede
+        // resolver cualquier referencia cruzada.
+        let mut analyzed: Vec<(PathBuf, Value, HashMap<String, String>)> = Vec::new();
+
         for path in &py_files {
             let file_bytes = match fs::read(path).await {
                 Ok(b) => b,
@@ -373,11 +533,18 @@ impl Backend {
             };
             let content_hash = hash_content(&file_bytes);
 
+            // Análisis de tipos: jedi para Python, TypeScript Compiler API para JS/TS (fallbacks)
+            let (mut type_hints, ts_hints) = tokio::join!(
+                run_jedi_analysis(path),
+                run_ts_analysis(path),
+            );
+            type_hints.extend(ts_hints);
+            let jedi_types = type_hints;
+
             // Intentar warm-up desde caché
             if let Some(cached_value) = self.try_load_from_cache(path, &content_hash).await {
                 self.upsert_store_value(path, &cached_value).await;
-                self.save_function_reference(path, &cached_value).await;
-                self.save_functions(path, &cached_value).await;
+                analyzed.push((path.clone(), cached_value, jedi_types));
                 continue;
             }
 
@@ -390,17 +557,24 @@ impl Backend {
                 let value: Value = serde_json::from_str(&json_str)
                     .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
                 self.upsert_store_value(path, &value).await;
-                self.save_function_reference(path, &value).await;
-                self.save_functions(path, &value).await;
                 let _ = self.persist_analysis_json(path, &value, &content_hash).await;
+                analyzed.push((path.clone(), value, jedi_types));
             }
+        }
+
+        // Pasada 2: con el store completo, computar todas las conexiones.
+        for (path, value, jedi_types) in analyzed {
+            self.save_function_reference(&path, &value, jedi_types).await;
+            self.save_functions(&path, &value).await;
         }
 
         if !py_files.is_empty() {
             let map = self.store.read().await;
             let message = format_for_lsp_message(map, root.clone());
+            let connections_guard = self.connections.read().await;
+            let connections_msg = format_connections_for_lsp(&connections_guard, &root);
             self.client
-                .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message, connections: connections_msg })
                 .await;
         }
     }
@@ -432,8 +606,8 @@ impl Backend {
             return;
         }
 
-        if path.extension().and_then(|e| e.to_str()) != Some("py") && path.extension().and_then(|e| e.to_str()) != Some("js") {
-          return;
+        if !matches!(path.extension().and_then(|e| e.to_str()), Some("py" | "js" | "ts" | "tsx" | "jsx")) {
+            return;
         }
 
         // Saltear archivos en carpetas ignoradas
@@ -455,15 +629,23 @@ impl Backend {
                 if let Ok(Ok(json_str)) = result {
                     let value: serde_json::Value = serde_json::from_str(&json_str)
                         .unwrap_or_else(|_| serde_json::json!({ "raw": json_str }));
+                    let (mut type_hints, ts_hints) = tokio::join!(
+                        run_jedi_analysis(path),
+                        run_ts_analysis(path),
+                    );
+                    type_hints.extend(ts_hints);
+                    let jedi_types = type_hints;
                     self.upsert_store_value(path, &value).await;
-                    self.save_function_reference(&path, &value).await;
+                    self.save_function_reference(&path, &value, jedi_types).await;
                     self.save_functions(&path, &value).await;
 
                     // Notifica al cliente con el agregado de este archivo
                     let map = self.store.read().await;
                     let message = format_for_lsp_message(map, root.clone());
+                    let connections_guard = self.connections.read().await;
+                    let connections_msg = format_connections_for_lsp(&connections_guard, &root);
                     self.client
-                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message, connections: connections_msg })
                         .await;
 
                     // Persiste a disco (ignora error no fatal)
@@ -494,7 +676,7 @@ impl Backend {
         guard.insert(original_path.to_path_buf(), value.clone());
     }
 
-    async fn save_function_reference(&self, original_path: &Path, value: &Value) {
+    async fn save_function_reference(&self, original_path: &Path, value: &Value, jedi_types: HashMap<String, String>) {
         let binding = value.clone();
         let path_string = original_path.to_str().unwrap().to_string();
 
@@ -541,11 +723,26 @@ impl Backend {
 
         // Helper closure: dado un type_name, encuentra el path del archivo que define esa clase
         let find_class_file = |type_name: &str| -> Option<String> {
+            // Normalizar: stripear notación de array (OrderItem[] → OrderItem)
+            let t = type_name.trim();
+            let t = t.strip_suffix("[]").unwrap_or(t).trim();
+            // Tipos primitivos/built-in nunca son clases de usuario
+            const BUILTINS: &[&str] = &[
+                "string", "number", "boolean", "void", "any", "unknown", "never",
+                "null", "undefined", "object", "symbol", "bigint",
+                "str", "int", "float", "bool", "bytes", "NoneType",
+                "Function", "Array", "Promise", "Error", "Object",
+                "Date", "RegExp", "Map", "Set", "WeakMap", "WeakSet",
+            ];
+            if BUILTINS.contains(&t) || t.is_empty() { return None; }
+            if t.len() == 1 { return None; } // parámetros genéricos T, K, V, etc.
+
             for (path, file_value) in &store_snapshot {
-                let classes = file_value.get("classes")?.as_array()?;
+                let Some(classes) = file_value.get("classes").and_then(|v| v.as_array()) else { continue; };
                 for class in classes {
-                    if class.get("name")?.as_str()? == type_name {
-                        return Some(path.to_str()?.to_string());
+                    let Some(name) = class.get("name").and_then(|v| v.as_str()) else { continue; };
+                    if name == t {
+                        return path.to_str().map(|s| s.to_string());
                     }
                 }
             }
@@ -577,8 +774,12 @@ impl Backend {
             function_calls: &Vec<Value>,
             local_variables: &Vec<Value>,
             parameters: &Vec<Value>,
+            self_attr_types: &HashMap<String, String>,
+            jedi_types: &HashMap<String, String>,
             path_string: &str,
             imports_hashmap: &HashMap<String, String>,
+            caller_class: Option<&str>,
+            caller_function: &str,
         | -> Vec<Connections> {
             let mut new_connections = vec![];
 
@@ -677,60 +878,287 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: path.clone(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: None,
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     }
                 } else if let Some(obj_name) = object_name {
                     // Caso 2: método sobre variable  →  obj.method()
-                    // Prioridad: local_variables (asignada desde función) → parameters (tipo anotado)
-                    let assigned_from = local_variables.iter()
-                        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name))
-                        .and_then(|v| v.get("assigned_from"))
-                        .and_then(|v| v.as_str());
+                    // Prioridad:
+                    //   2a. "self" / "this"          → mismo archivo
+                    //   2b. "self.attr" / "this.attr" → self_attr_types → jedi
+                    //   2c. local_variables           → variable asignada desde una llamada
+                    //   2d. parameters                → parámetro con tipo anotado
+                    //   2e. jedi                      → fallback para todos los casos no resueltos
 
-                    if let Some(assigned_func) = assigned_from {
-                        let source_import = function_calls.iter()
-                            .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
-                            .and_then(|c| c.get("import_name"))
+                    // Helper: clave jedi para un nombre en una línea dada.
+                    // Para atributos de instancia (obj_name = "self.order_service"),
+                    // jedi los indexa por el nombre del atributo ("order_service@line").
+                    let jedi_lookup = |lookup_name: &str| -> Option<String> {
+                        let key = format!("{}@{}", lookup_name, line);
+                        jedi_types.get(&key).cloned()
+                    };
+
+                    let connections_before = new_connections.len();
+
+                    if obj_name == "self" || obj_name == "this" {
+                        // 2a: self.funcion_de_clase() — mismo archivo
+                        new_connections.push(Connections {
+                            file_src: path_string.to_string(), file_use: path_string.to_string(),
+                            line, start_col, end_col, function: name.to_string(),
+                            class_name: caller_class.map(|s| s.to_string()),
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
+                        });
+                    } else if let Some(attr_name) = obj_name.strip_prefix("self.")
+                        .or_else(|| obj_name.strip_prefix("this."))
+                    {
+                        // 2b: self.order_service.funcion1() — tipo desde __init__ o jedi
+                        if let Some(type_name) = self_attr_types.get(attr_name) {
+                            if let Some(class_file) = find_class_file(type_name) {
+                                new_connections.push(Connections {
+                                    file_src: class_file, file_use: path_string.to_string(),
+                                    line, start_col, end_col, function: name.to_string(),
+                                    class_name: Some(type_name.clone()),
+                                    source_function: caller_function.to_string(),
+                                    source_class_name: caller_class.map(|s| s.to_string()),
+                                });
+                            }
+                        }
+                        // 2b-fallback jedi: cuando self_attr_types no tiene el attr
+                        // (ej: atributos asignados condicionalmente, herencia, etc.)
+                        if new_connections.len() == connections_before {
+                            if let Some(module_path) = jedi_lookup(attr_name) {
+                                new_connections.push(Connections {
+                                    file_src: module_path, file_use: path_string.to_string(),
+                                    line, start_col, end_col, function: name.to_string(),
+                                    class_name: None,
+                                    source_function: caller_function.to_string(),
+                                    source_class_name: caller_class.map(|s| s.to_string()),
+                                });
+                            }
+                        }
+                    } else {
+                        // 2c: variable local asignada desde una función
+                        // 2c-path-0: variable de loop/generator cuyo iterable es un atributo tipado
+                        // ej: `for item in self.items` donde `items: List[CartItem]`
+                        //     → `item` tiene iterated_from = "self.items"
+                        //     → strip prefix → attr = "items"
+                        //     → self_attr_types["items"] = "List[CartItem]"
+                        //     → extraer tipo elemento: "CartItem"
+                        //     → conexión a CartItem
+                        let iterated_from = local_variables.iter()
+                            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name))
+                            .and_then(|v| v.get("iterated_from"))
                             .and_then(|v| v.as_str());
 
-                        if let Some(module) = source_import {
-                            if let Some(return_type) = resolve_return_type(module, assigned_func) {
-                                if let Some(class_file) = find_class_file(&return_type) {
+                        if let Some(iterable) = iterated_from {
+                            let attr_name = iterable.strip_prefix("self.")
+                                .or_else(|| iterable.strip_prefix("this."));
+                            if let Some(attr) = attr_name {
+                                if let Some(collection_type) = self_attr_types.get(attr) {
+                                    let element_type = extract_element_type(collection_type)
+                                        .or_else(|| {
+                                            // Tuple[T, ...] — toma el primer elemento
+                                            let t = collection_type.trim();
+                                            t.strip_prefix("Tuple[").and_then(|s| s.strip_suffix(']'))
+                                                .and_then(|inner| inner.split(',').next())
+                                                .map(|s| s.trim().to_string())
+                                        });
+                                    if let Some(elem_type) = element_type {
+                                        let elem_type = elem_type.as_str();
+                                        if let Some(class_file) = find_class_file(elem_type) {
+                                            new_connections.push(Connections {
+                                                file_src: class_file, file_use: path_string.to_string(),
+                                                line, start_col, end_col, function: name.to_string(),
+                                                class_name: Some(elem_type.to_string()),
+                                                source_function: caller_function.to_string(),
+                                                source_class_name: caller_class.map(|s| s.to_string()),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let local_var = local_variables.iter()
+                            .find(|v| v.get("name").and_then(|n| n.as_str()) == Some(obj_name));
+                        let assigned_from = local_var
+                            .and_then(|v| v.get("assigned_from"))
+                            .and_then(|v| v.as_str());
+                        let destructured_property = local_var
+                            .and_then(|v| v.get("destructured_property"))
+                            .and_then(|v| v.as_str());
+
+                        if let Some(assigned_func) = assigned_from {
+                            let source_import = function_calls.iter()
+                                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
+                                .and_then(|c| c.get("import_name"))
+                                .and_then(|v| v.as_str());
+
+                            if let Some(module) = source_import {
+                                // 2c-path-1: la función vino de un import directo
+                                if let Some(raw_return_type) = resolve_return_type(module, assigned_func) {
+                                    let resolved_type = destructured_property
+                                        .and_then(|prop| extract_type_for_property(&raw_return_type, prop))
+                                        .unwrap_or(raw_return_type);
+                                    if let Some(class_file) = find_class_file(&resolved_type) {
+                                        new_connections.push(Connections {
+                                            file_src: class_file, file_use: path_string.to_string(),
+                                            line, start_col, end_col, function: name.to_string(),
+                                            class_name: Some(resolved_type.clone()),
+                                            source_function: caller_function.to_string(),
+                                            source_class_name: caller_class.map(|s| s.to_string()),
+                                        });
+                                    }
+                                }
+                            } else if destructured_property.is_some() {
+                                // 2c-path-1b: función local (mismo archivo) con destructuring
+                                // const { userAPI } = buildApp()  →  buscar buildApp en binding
+                                let source_fn_node = binding.get("functions")
+                                    .and_then(|v| v.as_array())
+                                    .and_then(|funcs| funcs.iter().find(|f| {
+                                        f.get("name").and_then(|n| n.as_str()) == Some(assigned_func)
+                                    }));
+                                let local_return_type = source_fn_node
+                                    .and_then(|f| f.get("return_type"))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
+                                if let Some(raw_return_type) = local_return_type {
+                                    if let Some(prop_type) = extract_type_for_property(&raw_return_type, destructured_property.unwrap()) {
+                                        if let Some(class_file) = find_class_file(&prop_type) {
+                                            new_connections.push(Connections {
+                                                file_src: class_file, file_use: path_string.to_string(),
+                                                line, start_col, end_col, function: name.to_string(),
+                                                class_name: Some(prop_type.clone()),
+                                                source_function: caller_function.to_string(),
+                                                source_class_name: caller_class.map(|s| s.to_string()),
+                                            });
+                                        }
+                                    }
+                                } else if new_connections.len() == connections_before {
+                                    // 2c-path-1b-fallback: buildApp sin return type anotado
+                                    // Buscar la variable local de buildApp cuyo nombre coincide con
+                                    // la propiedad destructurada (ej: "userAPI") y ver desde qué
+                                    // clase fue instanciada con `new`.
+                                    // const userAPI = new UserAPI(...)  →  type = "UserAPI"
+                                    let prop = destructured_property.unwrap();
+                                    let inferred_type = source_fn_node
+                                        .and_then(|f| f.get("local_variables"))
+                                        .and_then(|v| v.as_array())
+                                        .and_then(|vars| vars.iter().find(|v| {
+                                            v.get("name").and_then(|n| n.as_str()) == Some(prop)
+                                        }))
+                                        .and_then(|v| v.get("assigned_from"))
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string());
+                                    if let Some(type_name) = inferred_type {
+                                        if let Some(class_file) = find_class_file(&type_name) {
+                                            new_connections.push(Connections {
+                                                file_src: class_file, file_use: path_string.to_string(),
+                                                line, start_col, end_col, function: name.to_string(),
+                                                class_name: Some(type_name.clone()),
+                                                source_function: caller_function.to_string(),
+                                                source_class_name: caller_class.map(|s| s.to_string()),
+                                            });
+                                        }
+                                    }
+                                }
+                            } else {
+                                // 2c-path-2: la función fue llamada sobre self.attr o this.attr
+                                // ej: product = self.product_repo.find_by_id(id)
+                                //     → assigned_func = "find_by_id"
+                                //     → llamado sobre "self.product_repo" (object_name en function_calls)
+                                //     → product_repo: ProductRepository (de self_attr_types)
+                                //     → find_by_id devuelve Optional[Product]
+                                //     → product es Product
+                                // Métodos de array/lista que devuelven un elemento del tipo colección.
+                                const ARRAY_ELEMENT_METHODS: &[&str] = &[
+                                    "shift", "pop", "find", "findLast", "at", "get", "first", "last",
+                                ];
+
+                                let via_self_attr: Option<(String, String)> = function_calls.iter()
+                                    .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(assigned_func))
+                                    .and_then(|c| {
+                                        let obj = c.get("object_name").and_then(|v| v.as_str())?;
+                                        let attr = obj.strip_prefix("self.").or_else(|| obj.strip_prefix("this."))?;
+                                        let attr_type = self_attr_types.get(attr)?;
+
+                                        // Si es un método que devuelve elemento de colección
+                                        // (shift, pop, find…), extraer el tipo elemento directamente.
+                                        if ARRAY_ELEMENT_METHODS.contains(&assigned_func) {
+                                            if let Some(elem_type) = extract_element_type(attr_type) {
+                                                let f = find_class_file(&elem_type)?;
+                                                return Some((elem_type, f));
+                                            }
+                                        }
+
+                                        let class_file = find_class_file(attr_type)?;
+                                        let return_type = find_method_return_type(&class_file, attr_type, assigned_func)?;
+                                        // Unwrap Optional[T] / T | None → T
+                                        let base = {
+                                            let t = return_type.trim();
+                                            if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
+                                                inner.trim().to_string()
+                                            } else if let Some(b) = t.split('|').next() {
+                                                b.trim().to_string()
+                                            } else {
+                                                t.to_string()
+                                            }
+                                        };
+                                        find_class_file(&base).map(|f| (base, f))
+                                    });
+                                if let Some((callee_class, class_file)) = via_self_attr {
                                     new_connections.push(Connections {
                                         file_src: class_file, file_use: path_string.to_string(),
                                         line, start_col, end_col, function: name.to_string(),
+                                        class_name: Some(callee_class),
+                                        source_function: caller_function.to_string(),
+                                        source_class_name: caller_class.map(|s| s.to_string()),
+                                    });
+                                }
+                            }
+                        } else {
+                            // 2d: parámetro con tipo anotado
+                            let param_type = parameters.iter()
+                                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(obj_name))
+                                .and_then(|p| p.get("param_type"))
+                                .and_then(|v| v.as_str());
+
+                            if let Some(type_annotation) = param_type {
+                                let base_type = {
+                                    let t = type_annotation.trim().trim_matches('"').trim_matches('\'');
+                                    if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
+                                        inner.trim()
+                                    } else if let Some(base) = t.split('|').next() {
+                                        base.trim()
+                                    } else {
+                                        t
+                                    }
+                                };
+                                if let Some(class_file) = find_class_file(base_type) {
+                                    new_connections.push(Connections {
+                                        file_src: class_file, file_use: path_string.to_string(),
+                                        line, start_col, end_col, function: name.to_string(),
+                                        class_name: Some(base_type.to_string()),
+                                        source_function: caller_function.to_string(),
+                                        source_class_name: caller_class.map(|s| s.to_string()),
                                     });
                                 }
                             }
                         }
-                    } else {
-                        // Fallback: obj_name podría ser un parámetro con tipo anotado
-                        // ej: def f(product: Product) → product.price()
-                        let param_type = parameters.iter()
-                            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(obj_name))
-                            .and_then(|p| p.get("param_type"))
-                            .and_then(|v| v.as_str());
 
-                        if let Some(type_annotation) = param_type {
-                            // Extraer el tipo base para anotaciones comunes:
-                            //   "Product"           → "Product"
-                            //   "Optional[Product]" → "Product"
-                            //   "Product | None"    → "Product"
-                            //   '"Product"'         → "Product"  (forward ref)
-                            let base_type = {
-                                let t = type_annotation.trim().trim_matches('"').trim_matches('\'');
-                                if let Some(inner) = t.strip_prefix("Optional[").and_then(|s| s.strip_suffix(']')) {
-                                    inner.trim()
-                                } else if let Some(base) = t.split('|').next() {
-                                    base.trim()
-                                } else {
-                                    t
-                                }
-                            };
-                            if let Some(class_file) = find_class_file(base_type) {
+                        // 2e: fallback jedi para variable local/parámetro no resuelto
+                        // Cubre: tuple unpacking, Optional[T] en returns, List[T] en loops, etc.
+                        if new_connections.len() == connections_before {
+                            if let Some(module_path) = jedi_lookup(obj_name) {
                                 new_connections.push(Connections {
-                                    file_src: class_file, file_use: path_string.to_string(),
+                                    file_src: module_path, file_use: path_string.to_string(),
                                     line, start_col, end_col, function: name.to_string(),
+                                    class_name: None,
+                                    source_function: caller_function.to_string(),
+                                    source_class_name: caller_class.map(|s| s.to_string()),
                                 });
                             }
                         }
@@ -741,6 +1169,9 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: src_file.clone(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: call_contexts.get(source_fn).map(|(t, _)| t.clone()),
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     }
                 } else {
@@ -755,6 +1186,9 @@ impl Backend {
                         new_connections.push(Connections {
                             file_src: path_string.to_string(), file_use: path_string.to_string(),
                             line, start_col, end_col, function: name.to_string(),
+                            class_name: None,
+                            source_function: caller_function.to_string(),
+                            source_class_name: caller_class.map(|s| s.to_string()),
                         });
                     }
                 }
@@ -770,10 +1204,60 @@ impl Backend {
             .expect("classes no es un array");
 
         for class in classes {
+            let current_class_name = class.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let methods = class
                 .get("methods")
                 .and_then(|v| v.as_array())
                 .expect("methods no es un array");
+
+            // Construir mapa atributo_de_instancia → tipo.
+            // Fuentes (en orden de prioridad):
+            //   1. __init__ / constructor: self.attr = param donde param tiene tipo anotado
+            //   2. Class-level field annotations: items: List[CartItem] = field(...)
+            let self_attr_types: HashMap<String, String> = {
+                let empty: Vec<Value> = vec![];
+
+                let mut map: HashMap<String, String> = HashMap::new();
+
+                // Fuente 2: field annotations declaradas en el cuerpo de la clase
+                // Ej: `items: List[CartItem]` en un @dataclass
+                for field in class.get("fields").and_then(|v| v.as_array()).unwrap_or(&empty) {
+                    if let (Some(fname), Some(ann)) = (
+                        field.get("name").and_then(|v| v.as_str()),
+                        field.get("annotation").and_then(|v| v.as_str()),
+                    ) {
+                        map.insert(fname.to_string(), ann.to_string());
+                    }
+                }
+
+                // Fuente 1: __init__ / constructor (sobreescribe fields si hay conflicto)
+                if let Some(init_method) = methods.iter().find(|m| {
+                    matches!(m.get("name").and_then(|v| v.as_str()), Some("__init__") | Some("constructor"))
+                }) {
+                    let param_types: HashMap<String, String> = init_method
+                        .get("parameters").and_then(|v| v.as_array()).unwrap_or(&empty)
+                        .iter()
+                        .filter_map(|p| Some((
+                            p.get("name").and_then(|v| v.as_str())?.to_string(),
+                            p.get("param_type").and_then(|v| v.as_str())?.to_string(),
+                        )))
+                        .collect();
+
+                    for lv in init_method.get("local_variables").and_then(|v| v.as_array()).unwrap_or(&empty) {
+                        let lv_name = lv.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        let attr = lv_name.strip_prefix("self.").or_else(|| lv_name.strip_prefix("this."));
+                        if let Some(attr) = attr {
+                            if let Some(assigned_id) = lv.get("assigned_identifier").and_then(|v| v.as_str()) {
+                                if let Some(param_type) = param_types.get(assigned_id) {
+                                    map.insert(attr.to_string(), param_type.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                map
+            };
 
             for method in methods {
                 let function_calls = method
@@ -790,13 +1274,21 @@ impl Backend {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                let method_name = method
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 let new_connections = process_function_calls(
                     function_calls,
                     &local_variables,
                     &method_parameters,
+                    &self_attr_types,
+                    &jedi_types,
                     &path_string,
                     &imports_hashmap,
+                    Some(current_class_name.as_str()),
+                    method_name,
                 );
 
                 let mut guard = self.connections.write().await;
@@ -825,13 +1317,21 @@ impl Backend {
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+            let func_name = func
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             let new_connections = process_function_calls(
                 function_calls,
                 &local_variables,
                 &func_parameters,
+                &HashMap::new(), // funciones top-level no tienen self/this
+                &jedi_types,
                 &path_string,
                 &imports_hashmap,
+                None,
+                func_name,
             );
 
             let mut guard = self.connections.write().await;
@@ -854,6 +1354,7 @@ impl Backend {
             .expect("classes no es un array");
 
         for calss in calsses {
+            let class_name_str = calss.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
             let methods = calss
                 .get("methods")
                 .and_then(|v| v.as_array())
@@ -868,6 +1369,7 @@ impl Backend {
                     let functions_in_file = FunctionsInFiles {
                         file_src: path_string.clone(),
                         function: function_name.to_string(),
+                        class_name: class_name_str.clone(),
                         line,
                         name_start_col,
                         name_end_col,
@@ -893,6 +1395,7 @@ impl Backend {
                 let functions_in_file = FunctionsInFiles {
                     file_src: path_string.clone(),
                     function: function_name.to_string(),
+                    class_name: None,
                     line,
                     name_start_col,
                     name_end_col,
@@ -964,11 +1467,16 @@ impl Backend {
             .to_string_lossy()
             .to_string();
 
-        // 1. Buscar la definición
+        // 1. Buscar la definición — disambiguar por line y class_name cuando están disponibles
         let definition = {
             let guard = self.functions_in_file.read().await;
             guard.iter()
-                .find(|f| f.function == *old_name && f.file_src == abs_file_path)
+                .find(|f| {
+                    f.function == *old_name
+                    && f.file_src == abs_file_path
+                    && (params.line.is_none() || params.line == Some(f.line))
+                    && (params.class_name.is_none() || params.class_name == f.class_name)
+                })
                 .cloned()
         };
 
@@ -981,10 +1489,15 @@ impl Backend {
         };
 
         // 2. Recopilar todos los call sites que apuntan a esta definición
+        //    Filtramos también por class_name para no mezclar métodos homónimos de clases distintas
         let call_sites: Vec<Connections> = {
             let guard = self.connections.read().await;
             guard.iter()
-                .filter(|c| c.function == *old_name && c.file_src == def.file_src)
+                .filter(|c| {
+                    c.function == *old_name
+                    && c.file_src == def.file_src
+                    && c.class_name == def.class_name
+                })
                 .cloned()
                 .collect()
         };
@@ -1163,8 +1676,14 @@ impl LanguageServer for Backend {
                 };
 
                 // 2) Actualizamos el store en memoria
+                let (mut type_hints, ts_hints) = tokio::join!(
+                    run_jedi_analysis(&path),
+                    run_ts_analysis(&path),
+                );
+                type_hints.extend(ts_hints);
+                let jedi_types = type_hints;
                 self.upsert_store_value(&path, &value).await;
-                self.save_function_reference(&path, &value).await;
+                self.save_function_reference(&path, &value, jedi_types).await;
                 self.save_functions(&path, &value).await;
 
                 let changed_functions_firms: Vec<utils::FunctionChange> =
@@ -1181,9 +1700,10 @@ impl LanguageServer for Backend {
                     let unused_functions: Vec<FunctionsInFiles> =
                         utils::find_unused_functions(&functions_in_file_lock, &current_connections);
                     let message = format_for_lsp_message(map, root.clone());
+                    let connections_msg = format_connections_for_lsp(&current_connections, &root);
 
                     self.client
-                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message })
+                        .send_notification::<ProcessedJson>(ProcessedJsonPayload { files: message, connections: connections_msg })
                         .await;
                     if files_to_warn.len() > 0 {
                         for (_, files) in files_to_warn {
@@ -1249,6 +1769,8 @@ impl LanguageServer for Backend {
                                 .publish_diagnostics(uri, diagnostics, None)
                                 .await;
                         }
+                    } else {
+                      self.client.publish_diagnostics(uri, vec![], None).await;
                     }
                 }
 
