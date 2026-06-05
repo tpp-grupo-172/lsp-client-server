@@ -809,6 +809,20 @@ impl Backend {
                             if let Some(rt_file) = find_class_file(&rt) {
                                 call_contexts.insert(fc_name.to_string(), (rt, rt_file));
                             }
+                        } else {
+                            // fc_name puede ser un constructor de clase: SomeClass(...)
+                            // Los constructores no aparecen en top-level functions, pero el tipo de
+                            // retorno siempre es la clase misma → agregar contexto directamente.
+                            let is_class = store_snapshot.get(&PathBuf::from(src_file))
+                                .and_then(|fv| fv.get("classes"))
+                                .and_then(|c| c.as_array())
+                                .map(|classes| classes.iter().any(|c| {
+                                    c.get("name").and_then(|n| n.as_str()) == Some(fc_name)
+                                }))
+                                .unwrap_or(false);
+                            if is_class {
+                                call_contexts.insert(fc_name.to_string(), (fc_name.to_string(), src_file.clone()));
+                            }
                         }
                     }
                 } else {
@@ -851,11 +865,16 @@ impl Backend {
                         // El método fc_name vive en la clase source_type, definida en source_file
                         call_sources.insert(fc_name.to_string(), source_file.clone());
 
-                        // Intentar propagar el return_type para el siguiente eslabón
+                        // Intentar propagar el return_type para el siguiente eslabón.
+                        // Si no hay anotación, usar el mismo tipo (heurística builder: return self).
                         if let Some(rt) = find_method_return_type(&source_file, &source_type, fc_name) {
                             if let Some(rt_file) = find_class_file(&rt) {
                                 call_contexts.insert(fc_name.to_string(), (rt, rt_file));
+                            } else {
+                                call_contexts.insert(fc_name.to_string(), (source_type.clone(), source_file.clone()));
                             }
+                        } else {
+                            call_contexts.insert(fc_name.to_string(), (source_type.clone(), source_file.clone()));
                         }
                         changed = true;
                     }
@@ -1243,6 +1262,10 @@ impl Backend {
                         )))
                         .collect();
 
+                    let init_calls = init_method
+                        .get("function_calls").and_then(|v| v.as_array())
+                        .unwrap_or(&empty);
+
                     for lv in init_method.get("local_variables").and_then(|v| v.as_array()).unwrap_or(&empty) {
                         let lv_name = lv.get("name").and_then(|v| v.as_str()).unwrap_or("");
                         let attr = lv_name.strip_prefix("self.").or_else(|| lv_name.strip_prefix("this."));
@@ -1250,6 +1273,15 @@ impl Backend {
                             if let Some(assigned_id) = lv.get("assigned_identifier").and_then(|v| v.as_str()) {
                                 if let Some(param_type) = param_types.get(assigned_id) {
                                     map.insert(attr.to_string(), param_type.clone());
+                                }
+                            } else if let Some(constructor_name) = lv.get("assigned_from").and_then(|v| v.as_str()) {
+                                // self.attr = SomeClass(...) — inferir tipo del constructor importado
+                                let is_imported = init_calls.iter().any(|fc| {
+                                    fc.get("name").and_then(|v| v.as_str()) == Some(constructor_name)
+                                        && fc.get("import_name").and_then(|v| v.as_str()).is_some()
+                                });
+                                if is_imported {
+                                    map.insert(attr.to_string(), constructor_name.to_string());
                                 }
                             }
                         }
