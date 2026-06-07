@@ -7,7 +7,7 @@
 	// @ts-ignore -- no type declarations for cytoscape-edge-connections
 	import edgeConnections from 'cytoscape-edge-connections';
 	import './GraphView.css';
-	import { sendMessage } from './vscode';
+	import { sendMessage, sendMessageAndWait, vscode } from './vscode';
 
 	cytoscape.use(coseBilkent);
 	cytoscape.use(edgeConnections);
@@ -44,8 +44,10 @@
 	let _prevNodeId = null;
 
 	// ── Export state ─────────────────────────────────────────────────────────────
-	/** @type {'idle' | 'generating'} */
+	/** @type {'idle' | 'generating' | 'done' | 'error'} */
 	let exportState = 'idle';
+	/** @type {string} */
+	let exportErrorMsg = '';
 
 	// Reset rename state when selected node changes
 	$: {
@@ -130,10 +132,48 @@
 	});
 
 	// Cuando llega nueva data (graphCache cambia de referencia después del mount)
-	$: if (graphCache !== _mountedCache && _mountedCache !== null && cy) {
+	$: if (graphCache !== _mountedCache && _mountedCache !== null) {
+		handleDataUpdate();
+	}
+
+	function handleDataUpdate() {
 		_mountedCache = graphCache;
-		const currentId = navigationStack[navigationStack.length - 1] ?? graphCache.getRootId();
-		refreshLevel(currentId);
+
+		// Trim navigation stack to the deepest folder that still exists.
+		// If an entry is invalid all entries after it are also invalid (children
+		// of a removed folder can't exist), so we cut at the first missing node.
+		let cutAt = navigationStack.length;
+		for (let i = 0; i < navigationStack.length; i++) {
+			if (!graphCache.getNode(navigationStack[i])) { cutAt = i; break; }
+		}
+		const validStack = cutAt > 0 ? navigationStack.slice(0, cutAt) : [graphCache.getRootId()];
+		if (validStack.length !== navigationStack.length) navigationStack = validStack;
+
+		const currentId = validStack[validStack.length - 1];
+
+		// If cy is null (e.g. a navigation renderLevel is in progress), skip
+		// the incremental path and do a full render instead of silently dropping.
+		if (!cy) {
+			renderLevel(currentId);
+			return;
+		}
+
+		// Compare visible node sets. If they differ (node added or removed) use
+		// renderLevel so compound children are laid out correctly. Incremental
+		// refreshLevel mispositions nodes re-added as compound children because
+		// cy.extent() inside a batch doesn't account for newly added children.
+		const { nodes } = graphCache.getLevelElements(currentId);
+		const newIds = new Set(nodes.map((n) => /** @type {string} */ (n.data.id)));
+		/** @type {Set<string>} */
+		const oldIds = new Set(cy.nodes().not('.aux-node').map((n) => n.id()));
+
+		const sameSet = newIds.size === oldIds.size && [...newIds].every((id) => oldIds.has(id));
+
+		if (sameSet) {
+			refreshLevel(currentId);
+		} else {
+			renderLevel(currentId);
+		}
 	}
 
 	onDestroy(() => {
@@ -251,6 +291,7 @@
 	/** @param {string} folderId */
 	function refreshLevel(folderId) {
 		if (!cy || !ec) return;
+		const _cy = /** @type {cytoscape.Core} */ (cy);
 		selectedNode = null;
 
 		const { nodes, edges } = graphCache.getLevelElements(folderId);
@@ -261,25 +302,25 @@
 		// Guardar posiciones de nodos existentes
 		/** @type {Map<string, { x: number, y: number }>} */
 		const savedPos = new Map();
-		cy.nodes().not('.aux-node').forEach((n) => {
+		_cy.nodes().not('.aux-node').forEach((n) => {
 			savedPos.set(n.id(), { ...n.position() });
 		});
 
 		// Limpiar edges y aux-nodes del plugin
-		cy.edges().remove();
-		cy.nodes('.aux-node').remove();
+		_cy.edges().remove();
+		_cy.nodes('.aux-node').remove();
 
-		cy.batch(() => {
+		_cy.batch(() => {
 			// Eliminar nodos que ya no existen
-			cy.nodes().forEach((n) => {
+			_cy.nodes().forEach((n) => {
 				if (!newNodeMap.has(n.id())) n.remove();
 			});
 
 			// Agregar o actualizar nodos
 			for (const [id, nodeData] of newNodeMap) {
-				const existing = cy.getElementById(id);
+				const existing = _cy.getElementById(id);
 				if (existing.length === 0) {
-					cy.add({ group: 'nodes', data: nodeData.data });
+					_cy.add({ group: 'nodes', data: nodeData.data });
 				} else {
 					existing.data(nodeData.data);
 				}
@@ -287,16 +328,16 @@
 
 			// Restaurar posiciones de nodos que sobrevivieron
 			savedPos.forEach((pos, id) => {
-				const node = cy.getElementById(id);
+				const node = _cy.getElementById(id);
 				if (node.length) node.position(pos);
 			});
 
 			// Posicionar nodos nuevos en el centro del viewport
-			const ext = cy.extent();
+			const ext = _cy.extent();
 			const cx = (ext.x1 + ext.x2) / 2;
 			const cy_ = (ext.y1 + ext.y2) / 2;
 			let i = 0;
-			cy.nodes().not('.aux-node').forEach((n) => {
+			_cy.nodes().not('.aux-node').forEach((n) => {
 				if (!savedPos.has(n.id())) {
 					n.position({ x: cx + i * 60, y: cy_ + i * 60 });
 					i++;
@@ -305,7 +346,7 @@
 		});
 
 		// Re-agregar edges vía edge-connections
-		ec = cy.edgeConnections();
+		ec = /** @type {any} */ (_cy).edgeConnections();
 		ec.addEdges(groupEdgesForBundling(edges));
 	}
 
@@ -341,7 +382,7 @@
 			wheelSensitivity: 0.5
 		}));
 
-		ec = cy.edgeConnections();
+		ec = /** @type {any} */ (cy).edgeConnections();
 
 		cy.layout(/** @type {any} */ ({
 			name: 'cose-bilkent',
@@ -485,8 +526,7 @@
 					'font-size': 13,
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#e5c07b',
-					'text-wrap': 'wrap',
-					cursor: 'pointer'
+					'text-wrap': 'wrap'
 				}
 			},
 
@@ -510,8 +550,7 @@
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#569cd6',
 					'font-weight': 'bold',
-					padding: '8px',
-					cursor: 'pointer'
+					padding: '8px'
 				}
 			},
 			{
@@ -533,8 +572,7 @@
 					'font-family': '"Consolas", "Menlo", monospace',
 					color: '#569cd6',
 					'font-weight': 'bold',
-					padding: '8px',
-					cursor: 'pointer'
+					padding: '8px'
 				}
 			},
 
@@ -554,8 +592,7 @@
 					'text-valign': 'center',
 					'font-size': 10,
 					'font-family': '"Consolas", "Menlo", monospace',
-					color: '#4ec9b0',
-					cursor: 'pointer'
+					color: '#4ec9b0'
 				}
 			},
 
@@ -575,8 +612,7 @@
 					'text-valign': 'center',
 					'font-size': 10,
 					'font-family': '"Consolas", "Menlo", monospace',
-					color: '#dcdcaa',
-					cursor: 'pointer'
+					color: '#dcdcaa'
 				}
 			},
 
@@ -638,6 +674,166 @@
 		];
 	}
 
+	/** @returns {any[]} */
+	function buildExportStyle() {
+		return [
+			{
+				selector: 'node',
+				style: { 'z-index': 10, 'overlay-opacity': 0 }
+			},
+			{
+				selector: 'edge',
+				style: { 'z-index': 1 }
+			},
+			// Hide aux-nodes — only used for edge bundling in the interactive view
+			{
+				selector: 'node.aux-node',
+				style: { display: 'none' }
+			},
+			{
+				selector: 'node[type="folder"]',
+				style: {
+					shape: 'round-rectangle',
+					'background-color': '#2a2618',
+					'border-width': 1.5,
+					'border-color': '#e5c07b',
+					label: 'data(displayLabel)',
+					'text-valign': 'center',
+					'text-halign': 'center',
+					'font-size': 16,
+					'font-family': '"Consolas", "Menlo", monospace',
+					'font-weight': 'bold',
+					color: '#e5c07b',
+					'text-wrap': 'none',
+					width: 'label',
+					height: 'label',
+					padding: '8px',
+				}
+			},
+			{
+				selector: 'node[type="file"]',
+				style: {
+					shape: 'round-rectangle',
+					'background-color': '#12243a',
+					'border-width': 1.5,
+					'border-color': '#569cd6',
+					label: 'data(displayLabel)',
+					'text-valign': 'center',
+					'text-halign': 'center',
+					'font-size': 14,
+					'font-family': '"Consolas", "Menlo", monospace',
+					'font-weight': 'bold',
+					color: '#569cd6',
+					'text-wrap': 'none',
+					width: 'label',
+					height: 'label',
+					padding: '7px',
+				}
+			},
+			{
+				selector: 'node[type="class"]',
+				style: {
+					shape: 'round-rectangle',
+					'background-color': '#25466e',
+					'border-width': 1,
+					'border-color': '#6fb0e0',
+					label: 'data(label)',
+					'text-valign': 'center',
+					'text-halign': 'center',
+					'font-size': 12,
+					'font-family': '"Consolas", "Menlo", monospace',
+					color: '#9fc8e8',
+					'text-wrap': 'ellipsis',
+					'text-max-width': '110px',
+					width: 120,
+					height: 24,
+				}
+			},
+			{
+				selector: 'node[type="function"]',
+				style: {
+					shape: 'round-rectangle',
+					'background-color': '#0d2b25',
+					'border-width': 1,
+					'border-color': '#4ec9b0',
+					label: 'data(label)',
+					'text-valign': 'center',
+					'text-halign': 'center',
+					'font-size': 12,
+					'font-family': '"Consolas", "Menlo", monospace',
+					color: '#4ec9b0',
+					'text-wrap': 'ellipsis',
+					'text-max-width': '110px',
+					width: 120,
+					height: 24,
+				}
+			},
+			{
+				selector: 'node[type="method"]',
+				style: {
+					shape: 'round-rectangle',
+					'background-color': '#29271a',
+					'border-width': 1,
+					'border-color': '#dcdcaa',
+					label: 'data(label)',
+					'text-valign': 'center',
+					'text-halign': 'center',
+					'font-size': 12,
+					'font-family': '"Consolas", "Menlo", monospace',
+					color: '#dcdcaa',
+					'text-wrap': 'ellipsis',
+					'text-max-width': '110px',
+					width: 120,
+					height: 24,
+				}
+			},
+			{
+				selector: 'node[?externalImport]',
+				style: {
+					'background-color': '#2d1500',
+					'border-color': '#e06030',
+					color: '#e07848'
+				}
+			},
+			{
+				selector: 'edge[type="imports"]',
+				style: {
+					width: 1,
+					'line-color': '#4a5260',
+					'line-style': 'dashed',
+					'line-dash-pattern': [4, 3],
+					'target-arrow-shape': 'none',
+					'curve-style': 'bezier',
+				}
+			},
+			{
+				selector: 'edge[type="calls"]',
+				style: {
+					width: 1,
+					'line-color': '#3a9982',
+					'target-arrow-color': '#3a9982',
+					'target-arrow-shape': 'triangle',
+					'arrow-scale': 0.7,
+					'curve-style': 'bezier',
+				}
+			},
+			{
+				selector: 'edge[type="declares"]',
+				style: {
+					width: 1,
+					'line-color': '#3a4a5e',
+					'target-arrow-shape': 'none',
+					'curve-style': 'bezier',
+					opacity: 0.5,
+				}
+			},
+			{
+				selector: 'edge[type="contains"]',
+				style: { display: 'none' }
+			},
+		];
+	}
+
 	// ── Detail panel helper ──────────────────────────────────────────────────────
 	const NODE_TYPE_COLORS = {
 		folder: '#e5c07b',
@@ -651,12 +847,9 @@
 		if (exportState === 'generating') return;
 		exportState = 'generating';
 
-		// Yield so Svelte flushes the exportState update before blocking the thread with layout.
-		await new Promise((r) => setTimeout(r, 0));
-
 		const hiddenDiv = document.createElement('div');
 		hiddenDiv.style.cssText =
-			'position:absolute;left:-9999px;top:-9999px;width:3000px;height:2000px;pointer-events:none;';
+			'position:absolute;left:-9999px;top:-9999px;width:900px;height:900px;pointer-events:none;';
 		document.body.appendChild(hiddenDiv);
 
 		/** @type {cytoscape.Core | undefined} */
@@ -664,46 +857,104 @@
 		try {
 			const { nodes, edges } = graphCache.getAllElements();
 
-			// Edge bundling (cytoscape-edge-connections) is intentionally skipped here —
-			// the export uses plain Cytoscape edges to avoid aux-node artifacts in the PNG.
+				// ── Two-pass layout ──────────────────────────────────────────────────
+			// Pass 1: breadthfirst on file nodes only (no compound nesting).
+			// Pass 2: place each file's children in a compact grid below it.
+			// This keeps the hierarchy readable without compound node expansion.
+
+			const fileNodes  = nodes.filter((/** @type {any} */ n) => !n.data.parent);
+			const childNodes = nodes.filter((/** @type {any} */ n) =>  !!n.data.parent);
+
+			/** @type {Map<string, any[]>} */
+			const childrenByParent = new Map();
+			for (const child of childNodes) {
+				const pid = child.data.parent;
+				if (!childrenByParent.has(pid)) childrenByParent.set(pid, []);
+				childrenByParent.get(pid).push(child);
+			}
+
 			tempCy = cytoscape(/** @type {any} */ ({
 				container: hiddenDiv,
-				elements: { nodes, edges },
-				style: buildStyle(),
+				elements: { nodes: fileNodes, edges: [] },
+				style: buildExportStyle(),
 				userZoomingEnabled: false,
 				userPanningEnabled: false,
 				boxSelectionEnabled: false
 			}));
 
-			tempCy.layout(/** @type {any} */ ({
-				name: 'cose-bilkent',
-				nodeDimensionsIncludeLabels: true,
-				edgeElasticity: 0.08,
-				nodeRepulsion: 4500,
-				idealEdgeLength: 120,
-				nestingFactor: 0.1,
-				gravity: 0.15,
-				numIter: 2500,
-				tile: true,
-				padding: 60,
-				randomize: false,
-				animate: false
-			})).run();
+			// Grid layout wraps file nodes into rows instead of a single line.
+			tempCy.layout({
+				name: 'grid',
+				padding: 30,
+				spacingFactor: 1.0,
+				cols: Math.ceil(Math.sqrt(fileNodes.length)),
+				animate: false,
+			}).run();
 
-			const dataUrl = tempCy.png({ output: 'base64uri', full: true, scale: 2, bg: '#1e1e1e' });
+			// Pass 2: position children in a compact grid below their parent file.
+			const COLS       = 3;
+			const CHILD_W    = 120;
+			const CHILD_H    = 24;
+			const GAP_X      = 8;
+			const GAP_Y      = 6;
+			const PARENT_GAP = 14;
 
-			const a = document.createElement('a');
-			a.href = dataUrl;
-			a.download = 'dependency-graph.png';
-			document.body.appendChild(a);
-			a.click();
-			document.body.removeChild(a);
+			for (const [parentId, children] of childrenByParent) {
+				const parentEl = tempCy.getElementById(parentId);
+				if (parentEl.empty()) continue;
+
+				const pos    = parentEl.position();
+				const ph     = parentEl.height();
+				const cols   = Math.min(children.length, COLS);
+				const blockW = cols * CHILD_W + (cols - 1) * GAP_X;
+				const startX = pos.x - blockW / 2 + CHILD_W / 2;
+				const startY = pos.y + ph / 2 + PARENT_GAP + CHILD_H / 2;
+
+				tempCy.add(children.map((/** @type {any} */ child, i) => ({
+					group: 'nodes',
+					data: { ...child.data, parent: undefined },
+					position: {
+						x: startX + (i % COLS) * (CHILD_W + GAP_X),
+						y: startY + Math.floor(i / COLS) * (CHILD_H + GAP_Y)
+					}
+				})));
+			}
+
+			// Add edges last so all endpoints exist.
+			tempCy.add(edges);
+
+			const dataUrl = tempCy.png({ output: 'base64uri', full: true, scale: 3, bg: '#1e1e1e' });
+			const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+
+			if (vscode) {
+				const reply = await sendMessageAndWait(
+					'export-png',
+					{ data: base64 },
+					'export-png-result',
+					60000
+				);
+				if (reply.cancelled) {
+					exportState = 'idle';
+					return;
+				}
+				if (!reply.success) throw new Error(reply.error ?? 'Error al guardar');
+			} else {
+				const a = document.createElement('a');
+				a.href = dataUrl;
+				a.download = 'dependency-graph.png';
+				document.body.appendChild(a);
+				a.click();
+				document.body.removeChild(a);
+			}
+			exportState = 'done';
 		} catch (err) {
 			console.error('[exportPng] failed:', err);
+			exportErrorMsg = err instanceof Error ? err.message : String(err);
+			exportState = 'error';
 		} finally {
 			tempCy?.destroy();
 			document.body.removeChild(hiddenDiv);
-			exportState = 'idle';
+			setTimeout(() => { exportState = 'idle'; exportErrorMsg = ''; }, 3000);
 		}
 	}
 
@@ -767,11 +1018,16 @@
 		<button
 			type="button"
 			class="export-btn"
+			class:export-btn--done={exportState === 'done'}
+			class:export-btn--error={exportState === 'error'}
 			on:click={exportPng}
 			disabled={exportState === 'generating'}
-			title="Export full project graph as PNG"
+			title={exportState === 'error' ? exportErrorMsg : 'Export full project graph as PNG'}
 		>
-			{exportState === 'generating' ? 'Generating…' : 'Export PNG'}
+			{#if exportState === 'generating'}Generating…
+			{:else if exportState === 'done'}✓ Saved
+			{:else if exportState === 'error'}✗ Error
+			{:else}Export PNG{/if}
 		</button>
 	</header>
 
@@ -957,5 +1213,16 @@
 		color: #f48771;
 		background: #2b0d0d;
 		margin-bottom: 6px;
+	}
+
+	.export-btn--done {
+		background: #0d2b25 !important;
+		color: #4ec9b0 !important;
+		border-color: #4ec9b0 !important;
+	}
+	.export-btn--error {
+		background: #2b0d0d !important;
+		color: #f48771 !important;
+		border-color: #f48771 !important;
 	}
 </style>
