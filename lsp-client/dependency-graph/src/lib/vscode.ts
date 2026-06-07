@@ -1,5 +1,4 @@
 import { writable, type Writable } from 'svelte/store';
-import type { ProjectGraph } from './types';
 
 
 

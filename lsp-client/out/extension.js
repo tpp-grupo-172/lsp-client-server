@@ -41,6 +41,7 @@ const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
 let files;
+let connections = [];
 let activePanel;
 function activate(context) {
     const serverPath = context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
@@ -69,11 +70,16 @@ function activate(context) {
     client.start().then(() => {
         client.onNotification("lsp-server/processedJson", (data) => {
             files = data.files;
+            connections = data.connections ?? [];
+            outputChannel.appendLine(`[processedJson] files=${files?.length ?? 0} connections=${connections.length}`);
+            if (connections.length > 0) {
+                outputChannel.appendLine(`[processedJson] primera conexión: ${JSON.stringify(connections)}`);
+            }
             if (activePanel) {
                 activePanel.webview.postMessage({
                     command: 'lsp-server/processedJson',
                     files: files,
-                    connections: data.connections ?? [],
+                    connections,
                 });
             }
         });
@@ -124,7 +130,8 @@ function activate(context) {
                 if (files) {
                     panel.webview.postMessage({
                         command: 'lsp-server/processedJson',
-                        files: files
+                        files: files,
+                        connections,
                     });
                 }
                 // If files is null, the LSP notification will push data when it arrives

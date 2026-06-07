@@ -780,6 +780,7 @@ impl Backend {
             imports_hashmap: &HashMap<String, String>,
             caller_class: Option<&str>,
             caller_function: &str,
+            caller_return_type: Option<&str>,
         | -> Vec<Connections> {
             let mut new_connections = vec![];
 
@@ -976,26 +977,32 @@ impl Backend {
                             let attr_name = iterable.strip_prefix("self.")
                                 .or_else(|| iterable.strip_prefix("this."));
                             if let Some(attr) = attr_name {
-                                if let Some(collection_type) = self_attr_types.get(attr) {
-                                    let element_type = extract_element_type(collection_type)
+                                let elem_type_from_attr = self_attr_types.get(attr).and_then(|collection_type| {
+                                    extract_element_type(collection_type)
                                         .or_else(|| {
                                             // Tuple[T, ...] — toma el primer elemento
                                             let t = collection_type.trim();
                                             t.strip_prefix("Tuple[").and_then(|s| s.strip_suffix(']'))
                                                 .and_then(|inner| inner.split(',').next())
                                                 .map(|s| s.trim().to_string())
+                                        })
+                                });
+                                // Fallback: inferir desde el return_type del método actual.
+                                // Cubre el caso donde self.attr no tiene tipo declarado pero
+                                // el método devuelve List[X] → los elementos son de tipo X.
+                                let elem_type_from_return = || {
+                                    caller_return_type.and_then(|rt| extract_element_type(rt))
+                                };
+                                if let Some(elem_type) = elem_type_from_attr.or_else(elem_type_from_return) {
+                                    let elem_type = elem_type.as_str();
+                                    if let Some(class_file) = find_class_file(elem_type) {
+                                        new_connections.push(Connections {
+                                            file_src: class_file, file_use: path_string.to_string(),
+                                            line, start_col, end_col, function: name.to_string(),
+                                            class_name: Some(elem_type.to_string()),
+                                            source_function: caller_function.to_string(),
+                                            source_class_name: caller_class.map(|s| s.to_string()),
                                         });
-                                    if let Some(elem_type) = element_type {
-                                        let elem_type = elem_type.as_str();
-                                        if let Some(class_file) = find_class_file(elem_type) {
-                                            new_connections.push(Connections {
-                                                file_src: class_file, file_use: path_string.to_string(),
-                                                line, start_col, end_col, function: name.to_string(),
-                                                class_name: Some(elem_type.to_string()),
-                                                source_function: caller_function.to_string(),
-                                                source_class_name: caller_class.map(|s| s.to_string()),
-                                            });
-                                        }
                                     }
                                 }
                             }
@@ -1311,6 +1318,11 @@ impl Backend {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
 
+                let method_return_type = method
+                    .get("return_type")
+                    .filter(|v| !v.is_null())
+                    .and_then(|v| v.as_str());
+
                 let new_connections = process_function_calls(
                     function_calls,
                     &local_variables,
@@ -1321,6 +1333,7 @@ impl Backend {
                     &imports_hashmap,
                     Some(current_class_name.as_str()),
                     method_name,
+                    method_return_type,
                 );
 
                 let mut guard = self.connections.write().await;
@@ -1354,6 +1367,11 @@ impl Backend {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
+            let func_return_type = func
+                .get("return_type")
+                .filter(|v| !v.is_null())
+                .and_then(|v| v.as_str());
+
             let new_connections = process_function_calls(
                 function_calls,
                 &local_variables,
@@ -1364,6 +1382,7 @@ impl Backend {
                 &imports_hashmap,
                 None,
                 func_name,
+                func_return_type,
             );
 
             let mut guard = self.connections.write().await;

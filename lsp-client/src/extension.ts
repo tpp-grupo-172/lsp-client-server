@@ -11,6 +11,7 @@ import {
 let client: LanguageClient;
 
 let files: any;
+let connections: any[] = [];
 let activePanel: vscode.WebviewPanel | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -51,11 +52,16 @@ export function activate(context: vscode.ExtensionContext) {
   client.start().then(() => {
     client.onNotification("lsp-server/processedJson", (data: any) => {
       files = data.files;
+      connections = data.connections ?? [];
+      outputChannel.appendLine(`[processedJson] files=${files?.length ?? 0} connections=${connections.length}`);
+      if (connections.length > 0) {
+        outputChannel.appendLine(`[processedJson] primera conexión: ${JSON.stringify(connections)}`);
+      }
       if (activePanel) {
         activePanel.webview.postMessage({
           command: 'lsp-server/processedJson',
           files: files,
-          connections: data.connections ?? [],
+          connections,
         });
       }
     });
@@ -133,7 +139,8 @@ export function activate(context: vscode.ExtensionContext) {
           if (files) {
             panel.webview.postMessage({
               command: 'lsp-server/processedJson',
-              files: files
+              files: files,
+              connections,
             });
           }
           // If files is null, the LSP notification will push data when it arrives
