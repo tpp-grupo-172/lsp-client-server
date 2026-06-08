@@ -70,6 +70,14 @@
 		renameError = '';
 	}
 
+	/** Extrae el nombre de clase del ID de un nodo método (mth::file::ClassName::method)
+	 * @param {string | null | undefined} id */
+	function classNameFromNodeId(id) {
+		if (!id?.startsWith('mth::')) return null;
+		const parts = id.split('::');
+		return parts.length >= 4 ? parts[2] : null;
+	}
+
 	function submitRename() {
 		if (!selectedNode || !renameValue.trim() || renameValue.trim() === selectedNode.label) {
 			cancelRename();
@@ -79,7 +87,9 @@
 		sendMessage('rename-function', {
 			filePath: selectedNode.path,
 			oldName: selectedNode.label,
-			newName: renameValue.trim()
+			newName: renameValue.trim(),
+			line: selectedNode.line ?? null,
+			className: selectedNode.className ?? classNameFromNodeId(selectedNode.id) ?? null,
 		});
 	}
 

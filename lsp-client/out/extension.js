@@ -41,6 +41,7 @@ const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
 let client;
 let files;
+let connections = [];
 let activePanel;
 function activate(context) {
     const serverPath = context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
@@ -54,7 +55,10 @@ function activate(context) {
         documentSelector: [
             { scheme: "file", language: "plaintext" },
             { scheme: "file", language: "python" },
-            { scheme: "file", language: "javascript" }
+            { scheme: "file", language: "javascript" },
+            { scheme: "file", language: "typescript" },
+            { scheme: "file", language: "typescriptreact" },
+            { scheme: "file", language: "javascriptreact" },
         ],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
@@ -66,10 +70,16 @@ function activate(context) {
     client.start().then(() => {
         client.onNotification("lsp-server/processedJson", (data) => {
             files = data.files;
+            connections = data.connections ?? [];
+            outputChannel.appendLine(`[processedJson] files=${files?.length ?? 0} connections=${connections.length}`);
+            if (connections.length > 0) {
+                outputChannel.appendLine(`[processedJson] primera conexión: ${JSON.stringify(connections)}`);
+            }
             if (activePanel) {
                 activePanel.webview.postMessage({
                     command: 'lsp-server/processedJson',
-                    files: files
+                    files: files,
+                    connections,
                 });
             }
         });
@@ -97,6 +107,7 @@ function activate(context) {
     const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
         const panel = vscode.window.createWebviewPanel("dependencyGraph", "Dependency Graph", vscode.ViewColumn.One, {
             enableScripts: true,
+            retainContextWhenHidden: true,
             localResourceRoots: [
                 context.extensionUri
             ]
@@ -119,7 +130,8 @@ function activate(context) {
                 if (files) {
                     panel.webview.postMessage({
                         command: 'lsp-server/processedJson',
-                        files: files
+                        files: files,
+                        connections,
                     });
                 }
                 // If files is null, the LSP notification will push data when it arrives
@@ -129,7 +141,9 @@ function activate(context) {
                     const result = await client.sendRequest('lsp-server/renameFunction', {
                         file_path: message.filePath,
                         old_name: message.oldName,
-                        new_name: message.newName
+                        new_name: message.newName,
+                        line: message.line ?? null,
+                        class_name: message.className ?? null,
                     });
                     panel.webview.postMessage({
                         command: 'rename-function-result',

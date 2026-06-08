@@ -123,13 +123,14 @@ export function buildGraphFromTreeSitter(data) {
                 type: 'function',
                 path: file.file_name,
                 returnType: fn.return_type ?? fn.returnType ?? null,
+                line: fn.line ?? null,
             });
             link(file.file_name, id, 'declares');
         }
 
         for (const cls of file.classes ?? []) {
             const clsId = mkClsId(file.file_name, cls.name);
-            addNode({ id: clsId, label: cls.name, type: 'class', path: file.file_name });
+            addNode({ id: clsId, label: cls.name, type: 'class', path: file.file_name, line: cls.line ?? null });
             link(file.file_name, clsId, 'declares');
 
             for (const method of cls.methods ?? []) {
@@ -140,6 +141,8 @@ export function buildGraphFromTreeSitter(data) {
                     type: 'method',
                     path: file.file_name,
                     returnType: method.return_type ?? method.returnType ?? null,
+                    line: method.line ?? null,
+                    className: cls.name,
                 });
                 link(clsId, mthId, 'declares');
             }
@@ -147,36 +150,59 @@ export function buildGraphFromTreeSitter(data) {
     }
 
     // ── Pass 2: build all edges (all nodes exist now) ─────────────────────────
+
+    // Import edges are always built from raw data (backend doesn't send them pre-resolved)
     for (const file of data.files) {
         if (!file.file_name) continue;
-
-        // importAlias → resolved file path (e.g. "core_user" → "projecto/user.py")
-        /** @type {Map<string, string>} */
-        const importPathByName = new Map();
-        for (const imp of file.imports ?? []) {
-            if (imp.path) importPathByName.set(imp.name, imp.path);
-        }
-
-        // Import edges: declared file → importing file
         for (const imp of file.imports ?? []) {
             if (!imp.path) continue;
             if (!nodes.has(imp.path)) continue;
             link(imp.path, file.file_name, 'imports');
         }
+    }
 
-        // Call edges from top-level functions
-        for (const fn of file.functions ?? []) {
-            const callerId = mkFnId(file.file_name, fn.name);
-            const paramNames = new Set((fn.parameters ?? []).map(/** @param {{name:string}} p */ p => p.name));
-            buildCallEdges(fn.function_calls ?? [], callerId, file.file_name, importPathByName, paramNames);
+    // Call edges: use backend pre-resolved connections when available, otherwise derive locally
+    const backendConnections = Array.isArray(data.connections) && data.connections.length > 0
+        ? data.connections : null;
+
+    if (backendConnections) {
+        const seenEdges = new Set();
+        for (const conn of backendConnections) {
+            const sourceId = conn.source_class_name
+                ? mkMthId(conn.source_file, conn.source_class_name, conn.source_function)
+                : mkFnId(conn.source_file, conn.source_function);
+            const targetId = conn.target_class_name
+                ? mkMthId(conn.target_file, conn.target_class_name, conn.target_function)
+                : mkFnId(conn.target_file, conn.target_function);
+            const edgeKey = `calls|${sourceId}|${targetId}`;
+            if (nodes.has(sourceId) && nodes.has(targetId) && !seenEdges.has(edgeKey)) {
+                link(sourceId, targetId, 'calls');
+                seenEdges.add(edgeKey);
+            }
         }
+    } else {
+        // Fallback: derive call edges from raw function_calls (used when backend connections absent)
+        for (const file of data.files) {
+            if (!file.file_name) continue;
 
-        // Call edges from class methods
-        for (const cls of file.classes ?? []) {
-            for (const method of cls.methods ?? []) {
-                const callerId = mkMthId(file.file_name, cls.name, method.name);
-                const paramNames = new Set((method.parameters ?? []).map(/** @param {{name:string}} p */ p => p.name));
-                buildCallEdges(method.function_calls ?? [], callerId, file.file_name, importPathByName, paramNames);
+            /** @type {Map<string, string>} */
+            const importPathByName = new Map();
+            for (const imp of file.imports ?? []) {
+                if (imp.path) importPathByName.set(imp.name, imp.path);
+            }
+
+            for (const fn of file.functions ?? []) {
+                const callerId = mkFnId(file.file_name, fn.name);
+                const paramNames = new Set((fn.parameters ?? []).map(/** @param {{name:string}} p */ p => p.name));
+                buildCallEdges(fn.function_calls ?? [], callerId, file.file_name, importPathByName, paramNames);
+            }
+
+            for (const cls of file.classes ?? []) {
+                for (const method of cls.methods ?? []) {
+                    const callerId = mkMthId(file.file_name, cls.name, method.name);
+                    const paramNames = new Set((method.parameters ?? []).map(/** @param {{name:string}} p */ p => p.name));
+                    buildCallEdges(method.function_calls ?? [], callerId, file.file_name, importPathByName, paramNames);
+                }
             }
         }
     }

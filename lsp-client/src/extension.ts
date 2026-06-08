@@ -11,6 +11,7 @@ import {
 let client: LanguageClient;
 
 let files: any;
+let connections: any[] = [];
 let activePanel: vscode.WebviewPanel | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -29,7 +30,10 @@ export function activate(context: vscode.ExtensionContext) {
     documentSelector: [
       { scheme: "file", language: "plaintext" },
       { scheme: "file", language: "python" },
-      { scheme: "file", language: "javascript" }
+      { scheme: "file", language: "javascript" },
+      { scheme: "file", language: "typescript" },
+      { scheme: "file", language: "typescriptreact" },
+      { scheme: "file", language: "javascriptreact" },
     ],
     synchronize: {
       fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
@@ -48,10 +52,16 @@ export function activate(context: vscode.ExtensionContext) {
   client.start().then(() => {
     client.onNotification("lsp-server/processedJson", (data: any) => {
       files = data.files;
+      connections = data.connections ?? [];
+      outputChannel.appendLine(`[processedJson] files=${files?.length ?? 0} connections=${connections.length}`);
+      if (connections.length > 0) {
+        outputChannel.appendLine(`[processedJson] primera conexión: ${JSON.stringify(connections)}`);
+      }
       if (activePanel) {
         activePanel.webview.postMessage({
           command: 'lsp-server/processedJson',
-          files: files
+          files: files,
+          connections,
         });
       }
     });
@@ -129,7 +139,8 @@ export function activate(context: vscode.ExtensionContext) {
           if (files) {
             panel.webview.postMessage({
               command: 'lsp-server/processedJson',
-              files: files
+              files: files,
+              connections,
             });
           }
           // If files is null, the LSP notification will push data when it arrives
@@ -140,7 +151,9 @@ export function activate(context: vscode.ExtensionContext) {
             const result = await client.sendRequest('lsp-server/renameFunction', {
               file_path: message.filePath,
               old_name: message.oldName,
-              new_name: message.newName
+              new_name: message.newName,
+              line: message.line ?? null,
+              class_name: message.className ?? null,
             });
             panel.webview.postMessage({
               command: 'rename-function-result',
