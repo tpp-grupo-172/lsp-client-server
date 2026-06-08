@@ -15,3 +15,7 @@ target
 .vscode/*
 !.vscode/launch.json
 !.vscode/tasks.json
+
+# Compiled binaries and packaged extension (distributed via GitHub Releases)
+lsp-client/bin/
+*.vsix

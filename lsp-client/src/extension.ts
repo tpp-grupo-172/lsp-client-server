@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
@@ -8,16 +9,74 @@ import {
   TransportKind
 } from "vscode-languageclient/node";
 
+const TELEMETRY_ENDPOINT = "https://script.google.com/macros/s/PLACEHOLDER_APPS_SCRIPT_ID/exec";
+
 let client: LanguageClient;
 
 let files: any;
 let connections: any[] = [];
 let activePanel: vscode.WebviewPanel | undefined;
 
-export function activate(context: vscode.ExtensionContext) {
-  const serverPath = context.asAbsolutePath(
-    path.join("..", "lsp-backend", "target", "debug", "lsp-backend")
+function resolveBinaryPath(context: vscode.ExtensionContext): string {
+  const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
+  const platform = `${process.platform}-${process.arch}`;
+  const binaryName = process.platform === "win32" ? "lsp-backend.exe" : "lsp-backend";
+
+  const bundledPath = context.asAbsolutePath(path.join("bin", platform, binaryName));
+  if (fs.existsSync(bundledPath)) {
+    return bundledPath;
+  }
+
+  if (isDevelopment) {
+    return context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
+  }
+
+  throw new Error(`No se encontró el binario del servidor para la plataforma ${platform}. Reinstalá la extensión.`);
+}
+
+async function sendTelemetry(metrics: Record<string, number | string>) {
+  if (!vscode.env.isTelemetryEnabled) {
+    return;
+  }
+  if (TELEMETRY_ENDPOINT.includes("PLACEHOLDER")) {
+    return;
+  }
+  try {
+    await fetch(TELEMETRY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(metrics),
+    });
+  } catch {
+    // Telemetry is best-effort; never surface errors to the user
+  }
+}
+
+function showTelemetryNotice(context: vscode.ExtensionContext) {
+  if (context.globalState.get("telemetryNoticeShown")) {
+    return;
+  }
+  context.globalState.update("telemetryNoticeShown", true);
+
+  if (!vscode.env.isTelemetryEnabled) {
+    return;
+  }
+
+  vscode.window.showInformationMessage(
+    "Dependency Graph recolecta datos anónimos de uso (cantidad de archivos y funciones analizadas) para mejorar la extensión. Podés desactivarlo en Ajustes → Telemetry.",
+    "Entendido"
   );
+}
+
+export function activate(context: vscode.ExtensionContext) {
+  let serverPath: string;
+  try {
+    serverPath = resolveBinaryPath(context);
+  } catch (e: any) {
+    vscode.window.showErrorMessage(e.message);
+    return;
+  }
+
   const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
 
   const serverOptions: ServerOptions = {
@@ -25,26 +84,21 @@ export function activate(context: vscode.ExtensionContext) {
     debug: { command: serverPath, transport: TransportKind.stdio }
   };
 
-  const outputChannel = vscode.window.createOutputChannel("LSP Backend Logs");
+  const outputChannel = vscode.window.createOutputChannel("Dependency Graph Logs");
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
-      { scheme: "file", language: "plaintext" },
       { scheme: "file", language: "python" },
-      { scheme: "file", language: "javascript" },
-      { scheme: "file", language: "typescript" },
-      { scheme: "file", language: "typescriptreact" },
-      { scheme: "file", language: "javascriptreact" },
     ],
     synchronize: {
-      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
+      fileEvents: vscode.workspace.createFileSystemWatcher("**/*.py")
     },
     outputChannel,
-    traceOutputChannel: vscode.window.createOutputChannel("LSP Trace")
+    traceOutputChannel: vscode.window.createOutputChannel("Dependency Graph Trace")
   };
 
   client = new LanguageClient(
-    "myLspServer",
-    "My LSP Server",
+    "dependencyGraph",
+    "Dependency Graph",
     serverOptions,
     clientOptions
   );
@@ -54,12 +108,19 @@ export function activate(context: vscode.ExtensionContext) {
       files = data.files;
       connections = data.connections ?? [];
       outputChannel.appendLine(`[processedJson] files=${files?.length ?? 0} connections=${connections.length}`);
-      if (connections.length > 0) {
-        outputChannel.appendLine(`[processedJson] primera conexión: ${JSON.stringify(connections)}`);
-      }
+
+      sendTelemetry({
+        event: "analysis_complete",
+        fileCount: files?.length ?? 0,
+        totalFunctions: (files ?? []).reduce((acc: number, f: any) => acc + (f.functions?.length ?? 0), 0),
+        totalClasses: (files ?? []).reduce((acc: number, f: any) => acc + (f.classes?.length ?? 0), 0),
+        totalConnections: connections.length,
+        extensionVersion: context.extension.packageJSON.version,
+      });
+
       if (activePanel) {
         activePanel.webview.postMessage({
-          command: 'lsp-server/processedJson',
+          command: "lsp-server/processedJson",
           files: files,
           connections,
         });
@@ -67,37 +128,34 @@ export function activate(context: vscode.ExtensionContext) {
     });
   });
 
-  client.onNotification("lsp-server/showFilesToChange", (data: { files: Array<{ path: string, line: number }>}) => {
+  client.onNotification("lsp-server/showFilesToChange", (data: { files: Array<{ path: string, line: number }> }) => {
     if (isDevelopment) {
-      console.log("Recibido del LSP 2:", data);
+      console.log("Recibido del LSP:", data);
     }
     vscode.window.showInformationMessage(
-      `Function was changes, make sure to modify any needed places`,
-      'Open files'
+      "Una función fue modificada. Revisá los archivos que la usan.",
+      "Abrir archivos"
     ).then(selection => {
-      if (selection === 'Open files') {
+      if (selection === "Abrir archivos") {
         data.files.forEach((file: { path: string, line: number }) => {
-          console.log("Recibido del LSP 3:", file);
           vscode.workspace.openTextDocument(file.path)
             .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
-              .then(editor => {
-                const position = new vscode.Position(file.line - 1, 0);
-                
-                editor.selection = new vscode.Selection(position, position);
-                editor.revealRange(
-                  new vscode.Range(position, position),
-                  vscode.TextEditorRevealType.InCenter
-                );
-              });
-        })
+            .then(editor => {
+              const position = new vscode.Position(file.line - 1, 0);
+              editor.selection = new vscode.Selection(position, position);
+              editor.revealRange(
+                new vscode.Range(position, position),
+                vscode.TextEditorRevealType.InCenter
+              );
+            });
+        });
       }
     });
   });
 
+  showTelemetryNotice(context);
 
-  vscode.window.showInformationMessage("LSP extension active!");
-
-  const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
+  const disposable = vscode.commands.registerCommand("dependencyGraph.showGraph", async () => {
     const panel = vscode.window.createWebviewPanel(
       "dependencyGraph",
       "Dependency Graph",
@@ -105,9 +163,7 @@ export function activate(context: vscode.ExtensionContext) {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [
-          context.extensionUri
-        ]
+        localResourceRoots: [context.extensionUri]
       }
     );
 
@@ -125,30 +181,29 @@ export function activate(context: vscode.ExtensionContext) {
     const nonce = crypto.randomBytes(16).toString("base64url");
 
     html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
-    html = html.replace(/ crossorigin/g, '');
+    html = html.replace(/ crossorigin/g, "");
     html = html.replace(/<script/g, `<script nonce="${nonce}"`);
 
-    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
-    html = html.replace('<head>', `<head>\n    ${csp}`);
+    const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource} https:;">`;
+    html = html.replace("<head>", `<head>\n    ${csp}`);
 
     panel.webview.html = html;
 
     panel.webview.onDidReceiveMessage(
       async message => {
-        if (message.command === 'requestData') {
+        if (message.command === "requestData") {
           if (files) {
             panel.webview.postMessage({
-              command: 'lsp-server/processedJson',
+              command: "lsp-server/processedJson",
               files: files,
               connections,
             });
           }
-          // If files is null, the LSP notification will push data when it arrives
         }
 
-        if (message.command === 'rename-function') {
+        if (message.command === "rename-function") {
           try {
-            const result = await client.sendRequest('lsp-server/renameFunction', {
+            const result = await client.sendRequest("lsp-server/renameFunction", {
               file_path: message.filePath,
               old_name: message.oldName,
               new_name: message.newName,
@@ -156,14 +211,14 @@ export function activate(context: vscode.ExtensionContext) {
               class_name: message.className ?? null,
             });
             panel.webview.postMessage({
-              command: 'rename-function-result',
+              command: "rename-function-result",
               ...(result as object)
             });
           } catch (e: any) {
             panel.webview.postMessage({
-              command: 'rename-function-result',
+              command: "rename-function-result",
               success: false,
-              error: e?.message ?? 'Error desconocido'
+              error: e?.message ?? "Error desconocido"
             });
           }
         }
@@ -172,6 +227,7 @@ export function activate(context: vscode.ExtensionContext) {
       context.subscriptions
     );
   });
+
   context.subscriptions.push(disposable);
 }
 

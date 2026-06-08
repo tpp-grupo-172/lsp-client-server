@@ -36,48 +36,98 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const crypto = __importStar(require("crypto"));
+const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
+const TELEMETRY_ENDPOINT = "https://script.google.com/macros/s/PLACEHOLDER_APPS_SCRIPT_ID/exec";
 let client;
 let files;
 let connections = [];
 let activePanel;
+function resolveBinaryPath(context) {
+    const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
+    const platform = `${process.platform}-${process.arch}`;
+    const binaryName = process.platform === "win32" ? "lsp-backend.exe" : "lsp-backend";
+    const bundledPath = context.asAbsolutePath(path.join("bin", platform, binaryName));
+    if (fs.existsSync(bundledPath)) {
+        return bundledPath;
+    }
+    if (isDevelopment) {
+        return context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
+    }
+    throw new Error(`No se encontró el binario del servidor para la plataforma ${platform}. Reinstalá la extensión.`);
+}
+async function sendTelemetry(metrics) {
+    if (!vscode.env.isTelemetryEnabled) {
+        return;
+    }
+    if (TELEMETRY_ENDPOINT.includes("PLACEHOLDER")) {
+        return;
+    }
+    try {
+        await fetch(TELEMETRY_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(metrics),
+        });
+    }
+    catch {
+        // Telemetry is best-effort; never surface errors to the user
+    }
+}
+function showTelemetryNotice(context) {
+    if (context.globalState.get("telemetryNoticeShown")) {
+        return;
+    }
+    context.globalState.update("telemetryNoticeShown", true);
+    if (!vscode.env.isTelemetryEnabled) {
+        return;
+    }
+    vscode.window.showInformationMessage("Dependency Graph recolecta datos anónimos de uso (cantidad de archivos y funciones analizadas) para mejorar la extensión. Podés desactivarlo en Ajustes → Telemetry.", "Entendido");
+}
 function activate(context) {
-    const serverPath = context.asAbsolutePath(path.join("..", "lsp-backend", "target", "debug", "lsp-backend"));
+    let serverPath;
+    try {
+        serverPath = resolveBinaryPath(context);
+    }
+    catch (e) {
+        vscode.window.showErrorMessage(e.message);
+        return;
+    }
     const isDevelopment = context.extensionMode === vscode.ExtensionMode.Development;
     const serverOptions = {
         run: { command: serverPath, transport: node_1.TransportKind.stdio },
         debug: { command: serverPath, transport: node_1.TransportKind.stdio }
     };
-    const outputChannel = vscode.window.createOutputChannel("LSP Backend Logs");
+    const outputChannel = vscode.window.createOutputChannel("Dependency Graph Logs");
     const clientOptions = {
         documentSelector: [
-            { scheme: "file", language: "plaintext" },
             { scheme: "file", language: "python" },
-            { scheme: "file", language: "javascript" },
-            { scheme: "file", language: "typescript" },
-            { scheme: "file", language: "typescriptreact" },
-            { scheme: "file", language: "javascriptreact" },
         ],
         synchronize: {
-            fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
+            fileEvents: vscode.workspace.createFileSystemWatcher("**/*.py")
         },
         outputChannel,
-        traceOutputChannel: vscode.window.createOutputChannel("LSP Trace")
+        traceOutputChannel: vscode.window.createOutputChannel("Dependency Graph Trace")
     };
-    client = new node_1.LanguageClient("myLspServer", "My LSP Server", serverOptions, clientOptions);
+    client = new node_1.LanguageClient("dependencyGraph", "Dependency Graph", serverOptions, clientOptions);
     client.start().then(() => {
         client.onNotification("lsp-server/processedJson", (data) => {
             files = data.files;
             connections = data.connections ?? [];
             outputChannel.appendLine(`[processedJson] files=${files?.length ?? 0} connections=${connections.length}`);
-            if (connections.length > 0) {
-                outputChannel.appendLine(`[processedJson] primera conexión: ${JSON.stringify(connections)}`);
-            }
+            sendTelemetry({
+                event: "analysis_complete",
+                fileCount: files?.length ?? 0,
+                totalFunctions: (files ?? []).reduce((acc, f) => acc + (f.functions?.length ?? 0), 0),
+                totalClasses: (files ?? []).reduce((acc, f) => acc + (f.classes?.length ?? 0), 0),
+                totalConnections: connections.length,
+                extensionVersion: context.extension.packageJSON.version,
+            });
             if (activePanel) {
                 activePanel.webview.postMessage({
-                    command: 'lsp-server/processedJson',
+                    command: "lsp-server/processedJson",
                     files: files,
                     connections,
                 });
@@ -86,12 +136,11 @@ function activate(context) {
     });
     client.onNotification("lsp-server/showFilesToChange", (data) => {
         if (isDevelopment) {
-            console.log("Recibido del LSP 2:", data);
+            console.log("Recibido del LSP:", data);
         }
-        vscode.window.showInformationMessage(`Function was changes, make sure to modify any needed places`, 'Open files').then(selection => {
-            if (selection === 'Open files') {
+        vscode.window.showInformationMessage("Una función fue modificada. Revisá los archivos que la usan.", "Abrir archivos").then(selection => {
+            if (selection === "Abrir archivos") {
                 data.files.forEach((file) => {
-                    console.log("Recibido del LSP 3:", file);
                     vscode.workspace.openTextDocument(file.path)
                         .then(doc => vscode.window.showTextDocument(doc, { preview: false }))
                         .then(editor => {
@@ -103,14 +152,12 @@ function activate(context) {
             }
         });
     });
-    vscode.window.showInformationMessage("LSP extension active!");
-    const disposable = vscode.commands.registerCommand("myLspServer.showGraph", async () => {
+    showTelemetryNotice(context);
+    const disposable = vscode.commands.registerCommand("dependencyGraph.showGraph", async () => {
         const panel = vscode.window.createWebviewPanel("dependencyGraph", "Dependency Graph", vscode.ViewColumn.One, {
             enableScripts: true,
             retainContextWhenHidden: true,
-            localResourceRoots: [
-                context.extensionUri
-            ]
+            localResourceRoots: [context.extensionUri]
         });
         activePanel = panel;
         panel.onDidDispose(() => { activePanel = undefined; });
@@ -120,25 +167,24 @@ function activate(context) {
         const baseUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "dist"));
         const nonce = crypto.randomBytes(16).toString("base64url");
         html = html.replace(/(href|src)="\/assets\//g, `$1="${baseUri.toString()}/assets/`);
-        html = html.replace(/ crossorigin/g, '');
+        html = html.replace(/ crossorigin/g, "");
         html = html.replace(/<script/g, `<script nonce="${nonce}"`);
-        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource};">`;
-        html = html.replace('<head>', `<head>\n    ${csp}`);
+        const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${nonce}' ${panel.webview.cspSource}; style-src 'unsafe-inline' ${panel.webview.cspSource}; font-src ${panel.webview.cspSource}; img-src ${panel.webview.cspSource} data:; connect-src ${panel.webview.cspSource} https:;">`;
+        html = html.replace("<head>", `<head>\n    ${csp}`);
         panel.webview.html = html;
         panel.webview.onDidReceiveMessage(async (message) => {
-            if (message.command === 'requestData') {
+            if (message.command === "requestData") {
                 if (files) {
                     panel.webview.postMessage({
-                        command: 'lsp-server/processedJson',
+                        command: "lsp-server/processedJson",
                         files: files,
                         connections,
                     });
                 }
-                // If files is null, the LSP notification will push data when it arrives
             }
-            if (message.command === 'rename-function') {
+            if (message.command === "rename-function") {
                 try {
-                    const result = await client.sendRequest('lsp-server/renameFunction', {
+                    const result = await client.sendRequest("lsp-server/renameFunction", {
                         file_path: message.filePath,
                         old_name: message.oldName,
                         new_name: message.newName,
@@ -146,15 +192,15 @@ function activate(context) {
                         class_name: message.className ?? null,
                     });
                     panel.webview.postMessage({
-                        command: 'rename-function-result',
+                        command: "rename-function-result",
                         ...result
                     });
                 }
                 catch (e) {
                     panel.webview.postMessage({
-                        command: 'rename-function-result',
+                        command: "rename-function-result",
                         success: false,
-                        error: e?.message ?? 'Error desconocido'
+                        error: e?.message ?? "Error desconocido"
                     });
                 }
             }
