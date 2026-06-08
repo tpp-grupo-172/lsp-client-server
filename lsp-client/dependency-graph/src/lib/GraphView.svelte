@@ -849,7 +849,7 @@
 
 		const hiddenDiv = document.createElement('div');
 		hiddenDiv.style.cssText =
-			'position:absolute;left:-9999px;top:-9999px;width:900px;height:900px;pointer-events:none;';
+			'position:absolute;left:-9999px;top:-9999px;width:1600px;height:480px;pointer-events:none;';
 		document.body.appendChild(hiddenDiv);
 
 		/** @type {cytoscape.Core | undefined} */
@@ -897,7 +897,7 @@
 			const CHILD_H    = 24;
 			const GAP_X      = 8;
 			const GAP_Y      = 6;
-			const PARENT_GAP = 14;
+			const PARENT_GAP = 12;
 
 			for (const [parentId, children] of childrenByParent) {
 				const parentEl = tempCy.getElementById(parentId);
@@ -1027,7 +1027,7 @@
 			{#if exportState === 'generating'}Generating…
 			{:else if exportState === 'done'}✓ Saved
 			{:else if exportState === 'error'}✗ Error
-			{:else}Export PNG{/if}
+			{:else}Exportar PNG{/if}
 		</button>
 	</header>
 

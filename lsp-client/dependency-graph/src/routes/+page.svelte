@@ -8,9 +8,9 @@
 	let graphCache = $state(new GraphCache(mockTreeSitterData));
 
 	onMount(() => {
-		const vscode = acquireVsCodeApi();
+		const vscode = /** @type {any} */ (/** @type {any} */ (window).acquireVsCodeApi)();
 
-		const messageHandler = (event) => {
+		const messageHandler = (/** @type {MessageEvent} */ event) => {
 			const message = event.data;
 			if (message.command === "lsp-server/processedJson") {
 				console.log("Received data from VS Code:", message.files);
