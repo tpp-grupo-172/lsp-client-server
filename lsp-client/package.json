@@ -2,7 +2,7 @@
   "name": "dependency-graph",
   "displayName": "Multi-language Dependency Graph Visualizer",
   "description": "Analizador estático de Python y Typescript que genera un grafo interactivo de dependencias entre archivos, clases y funciones.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "tpp-grupo-172",
   "icon": "icon.png",
   "license": "MIT",
