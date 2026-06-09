@@ -1,10 +1,10 @@
 # Dependency Graph
 
-Analizador estático de Python que genera un grafo interactivo de dependencias entre archivos, clases y funciones.
+Analizador estático de Python y Typescript que genera un grafo interactivo de dependencias entre archivos, clases y funciones.
 
 ## Características
 
-- Analiza todos los archivos `.py` del workspace automáticamente
+- Analiza todos los archivos `.py` y `.ts` del workspace automáticamente
 - Muestra un grafo interactivo navegable: carpetas → archivos → clases → funciones
 - Detecta relaciones `imports`, `calls`, `declares` y `contains` entre elementos
 - Permite renombrar funciones directamente desde el grafo
@@ -13,13 +13,14 @@ Analizador estático de Python que genera un grafo interactivo de dependencias e
 
 ## Uso
 
-1. Abrí un workspace que contenga archivos `.py`
+1. Abrí un workspace que contenga archivos `.py` y `.ts`
 2. Ejecutá el comando **Show Dependency Graph** desde la paleta de comandos (`Ctrl+Shift+P` / `Cmd+Shift+P`)
 3. El grafo se genera automáticamente y se actualiza al guardar archivos
 
 ## Requisitos
 
-- Python 3 (opcional: instalar `jedi` para inferencia de tipos mejorada)
+- Python 3 (opcional: instalar `jedi` para inferencia de tipos mejorada en Python)
+- Node.js (opcional: necesario para inferencia de tipos en TS/JS). Además, el proyecto analizado debe tener `typescript` instalado en `node_modules` (lo normal si corriste `npm install`)
 
 ## Telemetría
 
