@@ -40,7 +40,7 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const vscode = __importStar(require("vscode"));
 const node_1 = require("vscode-languageclient/node");
-const TELEMETRY_ENDPOINT = "https://script.google.com/macros/s/PLACEHOLDER_APPS_SCRIPT_ID/exec";
+const TELEMETRY_ENDPOINT = "https://script.google.com/macros/s/AKfycbyxqakHA76y-eHSm-Ea4EzdL__CfZ5lqfZFNByQgdiCgg6OADmC1kHH0lLhdSB-I8Oc/exec";
 let client;
 let files;
 let connections = [];

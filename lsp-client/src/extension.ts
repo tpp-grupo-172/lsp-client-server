@@ -9,7 +9,7 @@ import {
   TransportKind
 } from "vscode-languageclient/node";
 
-const TELEMETRY_ENDPOINT = "https://script.google.com/macros/s/PLACEHOLDER_APPS_SCRIPT_ID/exec";
+const TELEMETRY_ENDPOINT = "https://script.google.com/macros/s/AKfycbyxqakHA76y-eHSm-Ea4EzdL__CfZ5lqfZFNByQgdiCgg6OADmC1kHH0lLhdSB-I8Oc/exec";
 
 let client: LanguageClient;
 

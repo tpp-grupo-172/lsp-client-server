@@ -3,7 +3,6 @@ src/**
 dependency-graph/src/**
 dependency-graph/node_modules/**
 dependency-graph/.svelte-kit/**
-node_modules/**
 tsconfig.json
 .gitignore
 **/*.map
