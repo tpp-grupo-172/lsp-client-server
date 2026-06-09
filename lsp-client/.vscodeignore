@@ -1,0 +1,10 @@
+.vscode/**
+src/**
+dependency-graph/src/**
+dependency-graph/node_modules/**
+dependency-graph/.svelte-kit/**
+tsconfig.json
+.gitignore
+**/*.map
+**/*.ts
+!out/**
