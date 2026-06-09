@@ -103,10 +103,15 @@ function activate(context) {
     const outputChannel = vscode.window.createOutputChannel("Dependency Graph Logs");
     const clientOptions = {
         documentSelector: [
+            { scheme: "file", language: "plaintext" },
             { scheme: "file", language: "python" },
+            { scheme: "file", language: "javascript" },
+            { scheme: "file", language: "typescript" },
+            { scheme: "file", language: "typescriptreact" },
+            { scheme: "file", language: "javascriptreact" },
         ],
         synchronize: {
-            fileEvents: vscode.workspace.createFileSystemWatcher("**/*.py")
+            fileEvents: vscode.workspace.createFileSystemWatcher("**/*.*")
         },
         outputChannel,
         traceOutputChannel: vscode.window.createOutputChannel("Dependency Graph Trace")
