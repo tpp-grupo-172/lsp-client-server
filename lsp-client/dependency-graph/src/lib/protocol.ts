@@ -60,8 +60,8 @@ export interface FunctionData {
 }
 
 export interface ParametersData {
-  default_value: string,
-  param_type : string,
+  default_value: string | null,
+  param_type: string | null,
   name: string
 }
 

@@ -39,3 +39,29 @@ export function sendMessage(command: string, data?: Record<string, unknown>) {
     console.warn('⚠️ VSCode API no disponible');
   }
 }
+
+/** Send a message and wait for a reply with the given response command. */
+export function sendMessageAndWait(
+  command: string,
+  data: Record<string, unknown>,
+  replyCommand: string,
+  timeoutMs = 30000
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      window.removeEventListener('message', handler);
+      reject(new Error('Timeout esperando respuesta de la extensión'));
+    }, timeoutMs);
+
+    function handler(event: MessageEvent) {
+      const msg = event.data;
+      if (!msg || msg.command !== replyCommand) return;
+      clearTimeout(timer);
+      window.removeEventListener('message', handler);
+      resolve(msg);
+    }
+
+    window.addEventListener('message', handler);
+    sendMessage(command, data);
+  });
+}
